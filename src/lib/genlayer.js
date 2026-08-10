@@ -47,6 +47,17 @@ export function getActiveProvider() {
   return activeProvider
 }
 
+/**
+ * Clears the connected wallet client-side. Wallet extensions don't expose a
+ * way to programmatically revoke eth_requestAccounts permission, so this
+ * only resets Lumen's own state — the next read falls back to a read-only
+ * client, and connecting again will re-prompt the wallet.
+ */
+export function disconnectWallet() {
+  activeProvider = null
+  clientPromise = null
+}
+
 /** Reads the wallet's current chain id (as a number), or null if no wallet is connected. */
 export async function getWalletChainId() {
   if (!activeProvider) return null

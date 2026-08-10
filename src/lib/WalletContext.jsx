@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { connectWallet, getWalletChainId, switchToTargetChain, getActiveProvider, TARGET_CHAIN_ID, TARGET_CHAIN } from './genlayer.js'
+import { connectWallet, disconnectWallet, getWalletChainId, switchToTargetChain, getActiveProvider, TARGET_CHAIN_ID, TARGET_CHAIN } from './genlayer.js'
 
 const WalletContext = createContext(null)
 
@@ -26,6 +26,13 @@ export function WalletProvider({ children }) {
     } finally {
       setConnecting(false)
     }
+  }, [])
+
+  const disconnect = useCallback(() => {
+    disconnectWallet()
+    setAddress(null)
+    setChainId(null)
+    setError(null)
   }, [])
 
   const switchChain = useCallback(async () => {
@@ -56,7 +63,7 @@ export function WalletProvider({ children }) {
 
   return (
     <WalletContext.Provider
-      value={{ address, connecting, error, connect, chainId, wrongChain, targetChainName: TARGET_CHAIN.name, switchChain, switchingChain }}
+      value={{ address, connecting, error, connect, disconnect, chainId, wrongChain, targetChainName: TARGET_CHAIN.name, switchChain, switchingChain }}
     >
       {children}
     </WalletContext.Provider>

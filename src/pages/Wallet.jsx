@@ -15,7 +15,7 @@ function weiToGen(wei) {
 }
 
 export function Wallet() {
-  const { address, connecting, connect, error } = useWallet()
+  const { address, connecting, connect, disconnect, error } = useWallet()
   const [pool, setPool] = useState(null)
   const [poolError, setPoolError] = useState(null)
   const [claims, setClaims] = useState([])
@@ -55,7 +55,15 @@ export function Wallet() {
           />
           {address ? (
             <>
-              <p className="relative text-sm text-text-secondary mb-1">Connected address</p>
+              <div className="relative flex items-start justify-between gap-4 mb-1">
+                <p className="text-sm text-text-secondary">Connected address</p>
+                <button
+                  onClick={disconnect}
+                  className="text-xs text-text-muted hover:text-danger transition-colors shrink-0"
+                >
+                  Disconnect
+                </button>
+              </div>
               <p className="relative text-lg font-mono mb-6 break-all">{address}</p>
               <div className="relative flex items-center gap-8">
                 <div>

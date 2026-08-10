@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Logo } from './Logo.jsx'
@@ -9,14 +10,52 @@ function shortAddress(addr) {
 }
 
 function WalletButton() {
-  const { address, connecting, connect, error } = useWallet()
+  const { address, connecting, connect, disconnect, error } = useWallet()
+  const [open, setOpen] = useState(false)
+  const menuRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handleClickOutside = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [open])
 
   if (address) {
     return (
-      <span className="flex items-center gap-2 h-9 px-4 rounded-full border border-border-soft text-sm text-text-secondary">
-        <span className="h-2 w-2 rounded-full bg-success" />
-        {shortAddress(address)}
-      </span>
+      <div className="relative" ref={menuRef}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2 h-9 px-4 rounded-full border border-border-soft text-sm text-text-secondary hover:border-border-medium hover:text-text-primary transition-colors"
+        >
+          <span className="h-2 w-2 rounded-full bg-success" />
+          {shortAddress(address)}
+        </button>
+        <AnimatePresence>
+          {open && (
+            <motion.div
+              initial={{ opacity: 0, y: -6 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -6 }}
+              transition={{ duration: 0.15 }}
+              className="absolute right-0 mt-2 w-56 rounded-xl border border-border-soft bg-bg-card shadow-[0_10px_36px_rgba(0,0,0,0.55)] overflow-hidden z-50"
+            >
+              <p className="px-4 py-3 text-xs text-text-muted font-mono break-all border-b border-border-subtle">{address}</p>
+              <button
+                onClick={() => {
+                  disconnect()
+                  setOpen(false)
+                }}
+                className="w-full text-left px-4 py-3 text-sm text-danger hover:bg-bg-card-hover transition-colors"
+              >
+                Disconnect wallet
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
     )
   }
 

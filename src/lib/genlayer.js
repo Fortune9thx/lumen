@@ -46,14 +46,29 @@ function getReadOnlyAccount() {
   return createAccount()
 }
 
-/** Connects via the browser wallet (MetaMask). Resolves once per session. */
+/**
+ * Connects via the browser wallet. Resolves once per session.
+ *
+ * genlayer-js's client.connect() helper is MetaMask-only (it installs a
+ * MetaMask Snap via wallet_getSnaps/wallet_requestSnaps), but that snap is
+ * only used by genlayer-js for chain add/switch convenience and for
+ * cancelTransaction() on studio networks — neither of which this app uses.
+ * The actual read/write path (readContract/writeContract) signs through the
+ * standard eth_sendTransaction RPC, which every EIP-1193 wallet supports.
+ * So instead of calling client.connect(), request accounts and switch chain
+ * ourselves, which works identically across MetaMask, OKX Wallet, Coinbase
+ * Wallet, Rabby, and any other injected wallet.
+ */
 export async function connectWallet() {
   if (!window.ethereum) {
-    throw new Error('No wallet found. Install MetaMask to create or manage policies.')
+    throw new Error('No wallet found. Install a browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, etc.) to create or manage policies.')
   }
   const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' })
+  const chainId = await getWalletChainId()
+  if (chainId !== TARGET_CHAIN_ID) {
+    await switchToTargetChain()
+  }
   const client = createClient({ chain: CHAIN, account: address, provider: window.ethereum })
-  await client.connect()
   clientPromise = Promise.resolve(client)
   return address
 }

@@ -16,6 +16,7 @@ const CHECKS = [
   ['coverageText', (v) => (v || '').trim().length >= 20, 'Describe the condition in at least 20 characters'],
   ['coverageAmountGen', (v) => isValidWholeGenAmount(v), 'Enter a whole GEN amount greater than 0, e.g. 2000'],
   ['premiumGen', (v) => isValidWholeGenAmount(v), 'Enter a whole GEN amount greater than 0, e.g. 120'],
+  ['expiry', (v) => (v || '').trim().length >= 2, 'Expiry date is required'],
 ]
 
 export function CreatePolicyWeather() {
@@ -27,6 +28,7 @@ export function CreatePolicyWeather() {
     coverageText: '',
     coverageAmountGen: '',
     premiumGen: '',
+    expiry: '',
   })
   const [fieldErrors, setFieldErrors] = useState({})
   const [submitting, setSubmitting] = useState(false)
@@ -87,6 +89,12 @@ export function CreatePolicyWeather() {
                 <Input placeholder="120" inputMode="numeric" value={form.premiumGen} onChange={set('premiumGen')} error={fieldErrors.premiumGen} />
               </FormField>
             </div>
+            <FormField label="Expiry" error={fieldErrors.expiry}>
+              <Input type="date" value={form.expiry} onChange={set('expiry')} error={fieldErrors.expiry} />
+            </FormField>
+            <p className="text-xs text-text-muted leading-relaxed -mt-2">
+              The last date the automatic weather trigger will consider a matching record valid for this policy.
+            </p>
             <p className="text-xs text-text-muted leading-relaxed">
               This is a parametric policy — your premium is paid in GEN and held in Lumen's payout pool. GenLayer
               validators monitor live rainfall data and settle automatically when your condition is met.

@@ -94,7 +94,12 @@ def test_full_flight_policy_lifecycle_to_paid(contract, direct_vm, direct_alice)
         contract.judge_claim(claim_id=claim_id)
 
 
-def test_full_weather_policy_lifecycle_with_rejection(contract, direct_vm, direct_alice):
+def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, direct_vm, direct_alice, direct_bob):
+    """Weather policies settle only through check_weather_trigger -- there is
+    no owner-submitted claim path (submit_claim rejects non-flight policies
+    outright, see TestClaimFlowSeparation). Anyone, including a third party
+    like direct_bob acting as a keeper, may call the trigger; it's a safe
+    no-op when the condition isn't met and settles for real once it is."""
     direct_vm.sender = direct_alice
     direct_vm.value = 250 * GEN_WEI
     try:
@@ -104,34 +109,66 @@ def test_full_weather_policy_lifecycle_with_rejection(contract, direct_vm, direc
             coverage_text="Pay me 200 GEN if Nakuru receives less than 5mm of rain over any 15 consecutive days.",
             coverage_amount_gen=200,
             premium_gen=250,
+            expiry="2026-05-31",
         )
     finally:
         direct_vm.value = 0
 
-    claim_id = contract.submit_claim(
-        policy_id=policy_id,
-        description="Believe drought conditions have been met this season.",
-        evidence_urls="https://example.com/rainfall-data",
+    # 1. A keeper (direct_bob, not the policy owner) polls the trigger while
+    # rainfall is still well above threshold -- safe no-op, no state change.
+    direct_vm.sender = direct_bob
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(
+        r"extracting objective facts only",
+        json.dumps({"record_matches_location": True, "is_within_window": True, "dry_days": 0, "rainfall_mm": 22}),
     )
+    result = json.loads(contract.check_weather_trigger(policy_id=policy_id))
+    assert result["triggered"] is False
 
-    mock_two_stage_judgment(
-        direct_vm,
-        facts={"dry_days": 0, "rainfall_mm": 22},
-        intent={
-            "approved": False,
-            "payout_amount": 0,
-            "confidence": "0.93",
-            "reasoning": "Public rainfall records show 22mm fell during the claimed window, well above the 5mm threshold.",
-        },
+    policy_after_noop = json.loads(contract.get_policy(policy_id=policy_id))
+    assert policy_after_noop["status"] == "active"  # untouched
+    pool_after_noop = json.loads(contract.get_pool_status())
+    assert pool_after_noop["reserved_liability_wei"] == str(200 * GEN_WEI)  # still reserved
+    assert json.loads(contract.list_claims_by_policy(policy_id=policy_id)) == []  # no claim spam from the no-op
+
+    # 2. Later, the drought condition is genuinely met -- the same keeper's
+    # poll now settles the policy automatically. check_weather_trigger's
+    # intent-stage prompt uses its own wording ("automatic parametric
+    # trigger condition"), distinct from judge_claim's ("adjudicating an
+    # insurance claim's INTENT"), so it's mocked directly here rather than
+    # via mock_two_stage_judgment (which targets judge_claim's marker).
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(
+        r"extracting objective facts only",
+        json.dumps({"record_matches_location": True, "is_within_window": True, "dry_days": 20, "rainfall_mm": 1}),
     )
-    status = contract.judge_claim(claim_id=claim_id)
-    assert status == "rejected"
+    direct_vm.mock_llm(
+        r"automatic parametric trigger condition",
+        json.dumps({
+            "approved": True,
+            "payout_amount": 200,
+            "confidence": "0.96",
+            "reasoning": "Independent rainfall records confirm only 1mm fell over a 20-day dry streak, satisfying the policy's 5mm/15-day threshold.",
+        }),
+    )
+    triggered = json.loads(contract.check_weather_trigger(policy_id=policy_id))
+    assert triggered["triggered"] is True
+    assert triggered["claim_id"] == "clm_1"
 
-    policy_after = json.loads(contract.get_policy(policy_id=policy_id))
-    assert policy_after["status"] == "active"  # rejection doesn't terminate the policy
+    policy_after_paid = json.loads(contract.get_policy(policy_id=policy_id))
+    assert policy_after_paid["status"] == "paid"
 
-    pool_after = json.loads(contract.get_pool_status())
-    assert pool_after["reserved_liability_wei"] == str(200 * GEN_WEI)  # still reserved for a future claim
+    claim = json.loads(contract.get_claim(claim_id="clm_1"))
+    assert claim["status"] == "approved"
+    assert claim["source"] == "auto_trigger"
+
+    pool_after_paid = json.loads(contract.get_pool_status())
+    assert pool_after_paid["reserved_liability_wei"] == "0"
+    assert pool_after_paid["total_payouts_paid_wei"] == str(200 * GEN_WEI)
+
+    # 3. Terminal-state protection: re-polling an already-paid policy reverts.
+    with pytest.raises(Exception):
+        contract.check_weather_trigger(policy_id=policy_id)
 
 
 def test_third_party_can_fund_the_pool_without_owning_any_policy(contract, direct_vm, direct_bob):

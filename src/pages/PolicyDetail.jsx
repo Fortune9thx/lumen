@@ -5,7 +5,7 @@ import { Card } from '../components/Card.jsx'
 import { StatusPill } from '../components/StatusPill.jsx'
 import { ButtonPrimary, ButtonGhost } from '../components/Button.jsx'
 import { Reveal } from '../components/Reveal.jsx'
-import { getPolicy, listClaimsByPolicy, cancelPolicy } from '../lib/genlayer.js'
+import { getPolicy, listClaimsByPolicy, cancelPolicy, checkWeatherTrigger } from '../lib/genlayer.js'
 
 export function PolicyDetail() {
   const { id } = useParams()
@@ -15,6 +15,8 @@ export function PolicyDetail() {
   const [error, setError] = useState(null)
   const [cancelling, setCancelling] = useState(false)
   const [cancelError, setCancelError] = useState(null)
+  const [checkingTrigger, setCheckingTrigger] = useState(false)
+  const [triggerError, setTriggerError] = useState(null)
 
   const load = () => {
     setLoading(true)
@@ -43,6 +45,19 @@ export function PolicyDetail() {
       setCancelError(err.message || 'Failed to cancel policy')
     } finally {
       setCancelling(false)
+    }
+  }
+
+  const handleCheckTrigger = async () => {
+    setTriggerError(null)
+    setCheckingTrigger(true)
+    try {
+      await checkWeatherTrigger(id)
+      await load()
+    } catch (err) {
+      setTriggerError(err.message || 'Failed to check weather trigger')
+    } finally {
+      setCheckingTrigger(false)
     }
   }
 
@@ -110,7 +125,11 @@ export function PolicyDetail() {
               {policy.type === 'flight' ? (
                 <Link to="/claims/new" state={{ policyId: policy.id }}><ButtonPrimary>Submit Claim</ButtonPrimary></Link>
               ) : (
-                <ButtonGhost disabled>Monitored automatically</ButtonGhost>
+                policy.status === 'active' && (
+                  <ButtonGhost onClick={handleCheckTrigger} disabled={checkingTrigger}>
+                    {checkingTrigger ? 'Checking…' : 'Check Trigger Now'}
+                  </ButtonGhost>
+                )
               )}
               {policy.status === 'active' && (
                 <ButtonGhost onClick={handleCancel} disabled={cancelling}>
@@ -119,6 +138,13 @@ export function PolicyDetail() {
               )}
             </div>
             {cancelError && <p className="text-xs text-danger mt-3">{cancelError}</p>}
+            {triggerError && <p className="text-xs text-danger mt-3">{triggerError}</p>}
+            {policy.type === 'weather' && policy.status === 'active' && !triggerError && (
+              <p className="text-xs text-text-muted mt-3">
+                Anyone can check this policy's trigger at any time — it's a no-op with no cost to the pool if the
+                condition isn't met yet, and settles automatically the moment it is.
+              </p>
+            )}
             {policy.status === 'active' && (
               <p className="text-xs text-text-muted mt-3">
                 Cancelling releases your reserved coverage back to the pool. The premium already paid is not refunded.

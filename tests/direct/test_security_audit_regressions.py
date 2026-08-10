@@ -198,6 +198,7 @@ class TestContractLevelInputValidation:
                     location="", period="Mar-May",
                     coverage_text="Pay $2000 if drought.",
                     coverage_amount_gen=2000, premium_gen=120,
+                    expiry="2026-05-31",
                 )
         finally:
             direct_vm.value = 0
@@ -287,7 +288,10 @@ class TestPromptInjectionHardening:
         # instruction, proving judgment isn't short-circuited by it -- that
         # mock only fires if the real fence markers are present.
         direct_vm.clear_mocks()
-        direct_vm.mock_llm(r"extracting objective facts only", json.dumps({"is_cancelled": False, "delay_minutes": 30}))
+        direct_vm.mock_llm(
+            r"extracting objective facts only",
+            json.dumps({"record_matches_flight": True, "is_within_window": True, "is_cancelled": False, "delay_minutes": 30}),
+        )
         direct_vm.mock_llm(guardrail_pattern, json.dumps({"approved": False, "payout_amount": 0, "confidence": "0.9", "reasoning": "No independent evidence of cancellation."}))
 
         contract.judge_claim(claim_id="clm_1")

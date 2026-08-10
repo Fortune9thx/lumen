@@ -163,6 +163,10 @@ const ERROR_MESSAGES = {
   INVALID_PERIOD: 'Coverage period is required.',
   INVALID_DESCRIPTION: 'A claim description is required.',
   INVALID_EVIDENCE_URLS: 'At least one evidence URL is required.',
+  WEATHER_POLICIES_USE_AUTOMATIC_TRIGGER: 'Weather policies settle automatically — there is no manual claim to submit. Use "Check trigger now" on the policy page instead.',
+  NOT_A_WEATHER_POLICY: 'This is a flight policy — submit a claim instead of checking the weather trigger.',
+  NOT_AUTHORIZED_TO_TRIGGER_JUDGMENT: "Only the policy owner or Lumen can trigger judgment on this claim.",
+  INVALID_STORED_COVERAGE_AMOUNT: 'This policy has an invalid stored coverage amount.',
 }
 
 /**
@@ -220,12 +224,23 @@ export async function createFlightPolicy({ flightNumber, flightDate, coverageTex
   )
 }
 
-export async function createWeatherPolicy({ location, period, coverageText, coverageAmountGen, premiumGen }) {
+export async function createWeatherPolicy({ location, period, coverageText, coverageAmountGen, premiumGen, expiry }) {
   return writeContract(
     'create_weather_policy',
-    [location, period, coverageText, Number(coverageAmountGen), Number(premiumGen)],
+    [location, period, coverageText, Number(coverageAmountGen), Number(premiumGen), expiry],
     genToWei(premiumGen),
   )
+}
+
+/**
+ * Permissionless automatic parametric trigger for weather policies — anyone
+ * may call this, not just the policy owner. Returns
+ * {triggered: boolean, reason: string, claim_id?: string}. A false result
+ * is not an error, just "condition not met yet, check again later."
+ */
+export async function checkWeatherTrigger(policyId) {
+  const hash = await writeContract('check_weather_trigger', [policyId])
+  return hash
 }
 
 export async function getPolicy(policyId) {

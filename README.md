@@ -3,7 +3,7 @@
 **Insurance written in language. Claims judged by decentralized AI. Settled in minutes on GenLayer.**
 
 **Live app:** [lumen-x9.vercel.app](https://lumen-x9.vercel.app)
-**Live contract (Bradbury):** [`0xE89DA4F6037769A87461beb22dA9237d8fb5B623`](https://explorer-bradbury.genlayer.com/address/0xE89DA4F6037769A87461beb22dA9237d8fb5B623)
+**Live contract (Bradbury):** [`0xC6821Dae5728D8980a74De406C11925C38c59934`](https://explorer-bradbury.genlayer.com/address/0xC6821Dae5728D8980a74De406C11925C38c59934)
 
 ## What Lumen does
 
@@ -32,7 +32,10 @@ src/lib/genlayer.js                genlayer-js client + typed contract call wrap
 src/lib/WalletContext.jsx          Wallet connect state + chain-mismatch detection
 src/components/ErrorBoundary.jsx   Catches unexpected render errors app-wide
 scripts/deploy.mjs                 Deploys the contract from a local private key
-scripts/check-deploy.mjs           Polls a deploy tx until it finalizes
+scripts/check-deploy.mjs           Polls a deploy tx until it finalizes (waitForTransactionReceipt)
+scripts/peek-tx.mjs                Reads a tx's current status without blocking on FINALIZED — use
+                                    this when Bradbury's finality wait times out but the tx already
+                                    reached ACCEPTED (a known testnet flakiness, not a failed deploy)
 scripts/probe-contract.mjs         Verifies a deployed contract is actually readable
 SECURITY.md                        Trust model, access-control matrix, judgment architecture
 ```
@@ -66,7 +69,7 @@ Set `.env` from `.env.example`:
 
 ```bash
 VITE_GENLAYER_CHAIN=bradbury
-VITE_LUMEN_CONTRACT_ADDRESS=0xE89DA4F6037769A87461beb22dA9237d8fb5B623
+VITE_LUMEN_CONTRACT_ADDRESS=0xC6821Dae5728D8980a74De406C11925C38c59934
 ```
 
 Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, Rabby, etc.) funded with Bradbury testnet GEN — the app discovers your wallet via EIP-6963 and handles network switching (including adding the chain if your wallet doesn't know it yet) automatically. To deploy your own instance instead, see `SECURITY.md` and the `scripts/deploy.mjs` → `check-deploy.mjs` → `probe-contract.mjs` flow (never trust a receipt alone — always read-verify a fresh deploy).

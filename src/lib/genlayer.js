@@ -7,27 +7,67 @@ const CONTRACT_ADDRESS = import.meta.env.VITE_LUMEN_CONTRACT_ADDRESS
 export const TARGET_CHAIN = CHAIN
 export const TARGET_CHAIN_ID = CHAIN.id
 
+/**
+ * Discovers the wallet provider to use.
+ *
+ * Modern multi-wallet browsers (OKX Wallet, Coinbase Wallet, Rabby, etc.
+ * installed alongside or instead of MetaMask) often do NOT set the legacy
+ * `window.ethereum` global unless the user has explicitly made that wallet
+ * their browser's "default" — they only announce themselves via EIP-6963
+ * (`eip6963:announceProvider`) or expose a vendor-prefixed global like
+ * `window.okxwallet`. Relying on `window.ethereum` alone silently breaks
+ * for anyone who hasn't set a default wallet, which is why OKX Wallet users
+ * were seeing "No wallet found" with the extension installed and active.
+ * This checks EIP-6963 first (the current standard, supported by OKX,
+ * Coinbase, Rabby, MetaMask and others), then falls back to legacy globals.
+ */
+async function discoverProviders() {
+  const found = []
+  const handleAnnounce = (event) => found.push(event.detail)
+  window.addEventListener('eip6963:announceProvider', handleAnnounce)
+  window.dispatchEvent(new Event('eip6963:requestProvider'))
+  // Providers announce synchronously in response to the request event, but
+  // give async-initializing extensions a short window to respond too.
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  window.removeEventListener('eip6963:announceProvider', handleAnnounce)
+  if (found.length > 0) return found.map((d) => d.provider)
+
+  const legacyProviders = []
+  if (window.ethereum?.providers?.length) legacyProviders.push(...window.ethereum.providers)
+  else if (window.ethereum) legacyProviders.push(window.ethereum)
+  if (window.okxwallet) legacyProviders.push(window.okxwallet)
+  if (window.coinbaseWalletExtension) legacyProviders.push(window.coinbaseWalletExtension)
+  return legacyProviders
+}
+
+let activeProvider = null
+
+/** Returns the connected wallet's provider, or null if nothing is connected yet. */
+export function getActiveProvider() {
+  return activeProvider
+}
+
 /** Reads the wallet's current chain id (as a number), or null if no wallet is connected. */
 export async function getWalletChainId() {
-  if (!window.ethereum) return null
-  const hex = await window.ethereum.request({ method: 'eth_chainId' })
+  if (!activeProvider) return null
+  const hex = await activeProvider.request({ method: 'eth_chainId' })
   return parseInt(hex, 16)
 }
 
 /** Prompts the wallet to switch to Lumen's target GenLayer chain, adding it first if the wallet doesn't know it yet. */
 export async function switchToTargetChain() {
-  if (!window.ethereum) {
+  if (!activeProvider) {
     throw new Error('No wallet found.')
   }
   const chainIdHex = `0x${TARGET_CHAIN_ID.toString(16)}`
   try {
-    await window.ethereum.request({
+    await activeProvider.request({
       method: 'wallet_switchEthereumChain',
       params: [{ chainId: chainIdHex }],
     })
   } catch (err) {
     if (err.code !== 4902) throw err // 4902 = chain unknown to the wallet
-    await window.ethereum.request({
+    await activeProvider.request({
       method: 'wallet_addEthereumChain',
       params: [{
         chainId: chainIdHex,
@@ -56,19 +96,23 @@ function getReadOnlyAccount() {
  * The actual read/write path (readContract/writeContract) signs through the
  * standard eth_sendTransaction RPC, which every EIP-1193 wallet supports.
  * So instead of calling client.connect(), request accounts and switch chain
- * ourselves, which works identically across MetaMask, OKX Wallet, Coinbase
+ * ourselves against whichever provider EIP-6963 (or a legacy global)
+ * discovers, which works identically across MetaMask, OKX Wallet, Coinbase
  * Wallet, Rabby, and any other injected wallet.
  */
 export async function connectWallet() {
-  if (!window.ethereum) {
+  const providers = await discoverProviders()
+  if (providers.length === 0) {
     throw new Error('No wallet found. Install a browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, etc.) to create or manage policies.')
   }
-  const [address] = await window.ethereum.request({ method: 'eth_requestAccounts' })
+  const provider = providers[0]
+  const [address] = await provider.request({ method: 'eth_requestAccounts' })
+  activeProvider = provider
   const chainId = await getWalletChainId()
   if (chainId !== TARGET_CHAIN_ID) {
     await switchToTargetChain()
   }
-  const client = createClient({ chain: CHAIN, account: address, provider: window.ethereum })
+  const client = createClient({ chain: CHAIN, account: address, provider })
   clientPromise = Promise.resolve(client)
   return address
 }

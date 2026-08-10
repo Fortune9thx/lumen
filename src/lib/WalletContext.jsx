@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
-import { connectWallet, getWalletChainId, switchToTargetChain, TARGET_CHAIN_ID, TARGET_CHAIN } from './genlayer.js'
+import { connectWallet, getWalletChainId, switchToTargetChain, getActiveProvider, TARGET_CHAIN_ID, TARGET_CHAIN } from './genlayer.js'
 
 const WalletContext = createContext(null)
 
@@ -43,11 +43,16 @@ export function WalletProvider({ children }) {
   }, [])
 
   useEffect(() => {
-    if (!window.ethereum) return
+    // Binds to whichever provider connectWallet() actually discovered and
+    // used (EIP-6963 or a legacy vendor global) — not necessarily
+    // window.ethereum, which some wallets (OKX included) don't set unless
+    // they're the browser's default wallet.
+    const provider = getActiveProvider()
+    if (!provider) return
     const handleChainChanged = (hex) => setChainId(parseInt(hex, 16))
-    window.ethereum.on?.('chainChanged', handleChainChanged)
-    return () => window.ethereum.removeListener?.('chainChanged', handleChainChanged)
-  }, [])
+    provider.on?.('chainChanged', handleChainChanged)
+    return () => provider.removeListener?.('chainChanged', handleChainChanged)
+  }, [address])
 
   return (
     <WalletContext.Provider

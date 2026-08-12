@@ -354,7 +354,7 @@ class TestBindingToPolicyDetails:
         direct_vm.mock_llm(
             r"extracting objective facts only",
             json.dumps({
-                "record_matches_flight": False, "is_within_window": True,
+                "record_matches_flight": False, "record_date": "2026-09-12",
                 "is_cancelled": False, "delay_minutes": 0,
                 "record_summary": "Found a record for flight BA999, not BA287 -- no match.",
             }),
@@ -370,6 +370,11 @@ class TestBindingToPolicyDetails:
         assert pool["total_payouts_paid_wei"] == "0"
 
     def test_record_outside_expiry_window_rejects_before_stage_b(self, contract, direct_vm):
+        """Expiry is enforced deterministically: the policy is created with
+        expiry="2026-09-12" (see _create_flight_policy), so a verified
+        record_date of "2026-09-15" -- after that expiry -- must fail the
+        binding gate via plain Python string comparison, independent of
+        anything the model itself claims about being "within window"."""
         _create_flight_policy(contract, direct_vm)
         contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
 
@@ -377,7 +382,7 @@ class TestBindingToPolicyDetails:
         direct_vm.mock_llm(
             r"extracting objective facts only",
             json.dumps({
-                "record_matches_flight": True, "is_within_window": False,
+                "record_matches_flight": True, "record_date": "2026-09-15",
                 "is_cancelled": True, "delay_minutes": 300,
                 "record_summary": "Flight BA287 record found, but its date is after the policy's expiry.",
             }),
@@ -386,14 +391,15 @@ class TestBindingToPolicyDetails:
         assert status == "rejected"
 
         claim = json.loads(contract.get_claim(claim_id="clm_1"))
-        assert claim["verified_facts"]["is_within_window"] is False
+        assert claim["verified_facts"]["record_date"] == "2026-09-15"
+        assert "expiry" in claim["reasoning"]
         pool = json.loads(contract.get_pool_status())
         assert pool["total_payouts_paid_wei"] == "0"
 
     def test_binding_fields_matching_and_within_window_reaches_and_can_pass_stage_b(self, contract, direct_vm):
         """Positive control: the binding gate isn't a permanent block --
-        when the verified record genuinely matches, judgment proceeds
-        normally and can still approve."""
+        when the verified record genuinely matches and is dated on/before
+        expiry, judgment proceeds normally and can still approve."""
         _create_flight_policy(contract, direct_vm, coverage_gen=500, premium_gen=600)
         contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
 
@@ -402,13 +408,13 @@ class TestBindingToPolicyDetails:
         assert status == "approved"
         claim = json.loads(contract.get_claim(claim_id="clm_1"))
         assert claim["verified_facts"]["record_matches_flight"] is True
-        assert claim["verified_facts"]["is_within_window"] is True
 
     def test_missing_binding_fields_default_to_rejected_not_approved(self, contract, direct_vm):
-        """A response that simply omits record_matches_flight/is_within_window
-        entirely (as opposed to explicitly setting them False) must still
-        fail closed -- strict boolean coercion treats a missing field the
-        same as an untrue one, never defaulting to a pass."""
+        """A response that simply omits record_matches_flight/record_date
+        entirely (as opposed to explicitly setting values) must still fail
+        closed -- strict boolean coercion and the deterministic date
+        comparison both treat a missing field as untrue/unparseable, never
+        defaulting to a pass."""
         _create_flight_policy(contract, direct_vm)
         contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
 
@@ -471,7 +477,7 @@ class TestStrictBooleanHandling:
         direct_vm.mock_llm(
             r"extracting objective facts only",
             json.dumps({
-                "record_matches_flight": True, "is_within_window": True,
+                "record_matches_flight": True, "record_date": "2026-09-12",
                 "is_cancelled": "true", "delay_minutes": 0,
             }),
         )
@@ -518,7 +524,7 @@ class TestClaimFlowSeparation:
         direct_vm.clear_mocks()
         direct_vm.mock_llm(
             r"extracting objective facts only",
-            json.dumps({"record_matches_location": True, "is_within_window": True, "dry_days": 0, "rainfall_mm": 30}),
+            json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 30}),
         )
         result = json.loads(contract.check_weather_trigger(policy_id="pol_1"))
         assert result["triggered"] is False  # no state change, but the call itself succeeds for a non-owner
@@ -528,8 +534,191 @@ class TestClaimFlowSeparation:
         direct_vm.clear_mocks()
         direct_vm.mock_llm(
             r"extracting objective facts only",
-            json.dumps({"record_matches_location": False, "is_within_window": True, "dry_days": 0, "rainfall_mm": 0, "record_summary": "no matching record"}),
+            json.dumps({"record_matches_location": False, "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 0, "record_summary": "no matching record"}),
         )
         contract.check_weather_trigger(policy_id="pol_1")
         contract.check_weather_trigger(policy_id="pol_1")  # polled twice, still a no-op
         assert json.loads(contract.list_claims_by_policy(policy_id="pol_1")) == []
+
+    def test_check_weather_trigger_rejects_when_record_is_outside_expiry(self, contract, direct_vm):
+        """Same deterministic expiry enforcement as flight -- record_period_end
+        after the policy's stored expiry ("2026-05-31" from
+        _create_weather_policy) fails the binding gate via plain Python
+        string comparison, regardless of the dry-day count."""
+        _create_weather_policy(contract, direct_vm)
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(
+            r"extracting objective facts only",
+            json.dumps({"record_matches_location": True, "record_period_end": "2026-06-15", "dry_days": 20, "rainfall_mm": 0}),
+        )
+        result = json.loads(contract.check_weather_trigger(policy_id="pol_1"))
+        assert result["triggered"] is False
+
+        policy = json.loads(contract.get_policy(policy_id="pol_1"))
+        assert policy["status"] == "active"
+        assert json.loads(contract.list_claims_by_policy(policy_id="pol_1")) == []
+
+
+class TestParentPolicyActiveRequirement:
+    """Steward review requirement: the parent policy must be checked ACTIVE
+    before any extraction/LLM work runs in judge_claim (and
+    check_weather_trigger, which already had this check). Composed
+    correctly with sibling-claim closing (see TestSiblingClaimClosing
+    below), a "pending" claim whose parent policy has become non-active is
+    not actually reachable via the public API -- cancel_policy and a
+    successful judge_claim both eagerly close every other pending claim for
+    that policy the moment the policy leaves "active", so there is no
+    surviving pending claim left to attempt judging afterward. That is a
+    STRONGER guarantee than "reverts on attempt": the claim is proactively
+    resolved to "rejected" rather than left dangling. This test proves that
+    end-to-end outcome; judge_claim's own `if policy_record.get("status")
+    != "active": raise POLICY_NOT_ACTIVE` line remains as defense-in-depth
+    for any future code path that might flip policy status without also
+    wiring in sibling-claim closing."""
+
+    def test_cannot_judge_a_claim_whose_policy_was_cancelled(self, contract, direct_vm):
+        _create_flight_policy(contract, direct_vm)
+        contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
+
+        contract.cancel_policy(policy_id="pol_1")
+
+        claim = json.loads(contract.get_claim(claim_id="clm_1"))
+        assert claim["status"] == "rejected"
+        assert "cancelled" in claim["reasoning"]
+
+        with pytest.raises(Exception):
+            contract.judge_claim(claim_id="clm_1")
+
+        pool = json.loads(contract.get_pool_status())
+        assert pool["total_payouts_paid_wei"] == "0"
+
+
+class TestSiblingClaimClosing:
+    """Steward review requirement: when a claim is paid, or a policy is
+    cancelled, every OTHER still-pending claim against the same policy must
+    be closed (never able to receive a payout afterward), not left sitting
+    in "pending" forever."""
+
+    def test_approving_one_claim_closes_other_pending_claims_on_the_same_policy(self, contract, direct_vm):
+        _create_flight_policy(contract, direct_vm, coverage_gen=500, premium_gen=600)
+        contract.submit_claim(policy_id="pol_1", description="First attempt at a claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        contract.submit_claim(policy_id="pol_1", description="Second attempt at a claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        contract.submit_claim(policy_id="pol_1", description="Third attempt at a claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+
+        _mock_approval(direct_vm, coverage_gen=500)
+        status = contract.judge_claim(claim_id="clm_2")  # judge the middle one first
+        assert status == "approved"
+
+        sibling_1 = json.loads(contract.get_claim(claim_id="clm_1"))
+        sibling_3 = json.loads(contract.get_claim(claim_id="clm_3"))
+        assert sibling_1["status"] == "rejected"
+        assert "sibling claim settled" in sibling_1["reasoning"]
+        assert sibling_3["status"] == "rejected"
+        assert "sibling claim settled" in sibling_3["reasoning"]
+
+        # Closed siblings can never later be approved -- CLAIM_ALREADY_JUDGED.
+        with pytest.raises(Exception):
+            contract.judge_claim(claim_id="clm_1")
+        with pytest.raises(Exception):
+            contract.judge_claim(claim_id="clm_3")
+
+        pool = json.loads(contract.get_pool_status())
+        assert pool["total_payouts_paid_wei"] == str(500 * GEN_WEI)  # exactly one payout, not three
+
+    def test_rejecting_a_claim_does_not_close_pending_siblings(self, contract, direct_vm):
+        """Sibling-closing only fires on a genuine settlement (approval or
+        cancellation) -- a claim that's merely rejected leaves the policy
+        active and other pending claims untouched, since the policy is
+        still legitimately open for a real claim."""
+        _create_flight_policy(contract, direct_vm)
+        contract.submit_claim(policy_id="pol_1", description="Weak first attempt." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        contract.submit_claim(policy_id="pol_1", description="Second, stronger attempt." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+
+        _mock_rejection(direct_vm)
+        contract.judge_claim(claim_id="clm_1")
+
+        sibling = json.loads(contract.get_claim(claim_id="clm_2"))
+        assert sibling["status"] == "pending"
+
+        policy = json.loads(contract.get_policy(policy_id="pol_1"))
+        assert policy["status"] == "active"
+
+    def test_cancelling_a_policy_closes_its_pending_claims(self, contract, direct_vm):
+        _create_flight_policy(contract, direct_vm)
+        contract.submit_claim(policy_id="pol_1", description="A claim that will be orphaned." + "x" * 5, evidence_urls="https://flightaware.com/live/flight/BA287")
+
+        contract.cancel_policy(policy_id="pol_1")
+
+        claim = json.loads(contract.get_claim(claim_id="clm_1"))
+        assert claim["status"] == "rejected"
+        assert "cancelled" in claim["reasoning"]
+
+
+class TestCrossPolicyReserveIsolation:
+    """Steward review requirement: one policy must never be able to consume
+    another policy's reserve. The pool is shared (see SECURITY.md's Trust
+    model), but each policy's payout amount is always sourced from that
+    policy's OWN stored coverage_amount_wei -- there is no code path where
+    judging policy A's claim reads or spends policy B's coverage amount."""
+
+    def test_paying_policy_a_does_not_change_policy_bs_stored_reserve_or_record(self, contract, direct_vm):
+        _create_flight_policy(contract, direct_vm, coverage_gen=300, premium_gen=400)  # pol_1 (A)
+        _create_flight_policy(contract, direct_vm, coverage_gen=200, premium_gen=250)  # pol_2 (B)
+
+        policy_b_before = json.loads(contract.get_policy(policy_id="pol_2"))
+
+        contract.submit_claim(policy_id="pol_1", description="Policy A's claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        _mock_approval(direct_vm, coverage_gen=300)
+        status = contract.judge_claim(claim_id="clm_1")
+        assert status == "approved"
+
+        # Policy B's own record is byte-for-byte unaffected by A's payout.
+        policy_b_after = json.loads(contract.get_policy(policy_id="pol_2"))
+        assert policy_b_after == policy_b_before
+        assert policy_b_after["status"] == "active"
+        assert policy_b_after["coverage_amount_wei"] == str(200 * GEN_WEI)
+
+        pool = json.loads(contract.get_pool_status())
+        # 400 + 250 premium - 300 payout = 350 balance; B's 200 GEN coverage
+        # is still fully reserved out of what remains.
+        assert pool["pool_balance_wei"] == str(350 * GEN_WEI)
+        assert pool["reserved_liability_wei"] == str(200 * GEN_WEI)  # only B's reserve remains
+        assert pool["total_payouts_paid_wei"] == str(300 * GEN_WEI)  # exactly A's amount, not A+B
+
+    def test_policy_b_can_still_be_paid_its_own_full_amount_after_a_settles(self, contract, direct_vm):
+        """The sharper version: A settling first must not have silently
+        consumed any part of B's reserve -- B's own claim must still be
+        payable in full afterward."""
+        _create_flight_policy(contract, direct_vm, coverage_gen=300, premium_gen=400)  # pol_1 (A)
+        _create_flight_policy(contract, direct_vm, coverage_gen=200, premium_gen=250)  # pol_2 (B)
+
+        contract.submit_claim(policy_id="pol_1", description="Policy A's claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        _mock_approval(direct_vm, coverage_gen=300)
+        contract.judge_claim(claim_id="clm_1")
+
+        contract.submit_claim(policy_id="pol_2", description="Policy B's claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        _mock_approval(direct_vm, coverage_gen=200)
+        status = contract.judge_claim(claim_id="clm_2")
+        assert status == "approved"
+
+        pool = json.loads(contract.get_pool_status())
+        assert pool["total_payouts_paid_wei"] == str(500 * GEN_WEI)  # A's 300 + B's 200, both paid in full
+        assert pool["reserved_liability_wei"] == "0"
+
+    def test_policy_b_cannot_be_paid_more_than_its_own_reserved_amount_even_if_a_is_cancelled(self, contract, direct_vm):
+        """A's reserve returning to the pool when A is cancelled makes the
+        pool's spare capacity available for NEW policies (correct, shared-
+        pool behavior) -- but B's own claim, judged on B's own already-fixed
+        coverage_amount_wei, is completely unaffected either way."""
+        _create_flight_policy(contract, direct_vm, coverage_gen=300, premium_gen=400)  # pol_1 (A)
+        _create_flight_policy(contract, direct_vm, coverage_gen=200, premium_gen=250)  # pol_2 (B)
+
+        contract.cancel_policy(policy_id="pol_1")
+
+        contract.submit_claim(policy_id="pol_2", description="Policy B's claim." + "x" * 10, evidence_urls="https://flightaware.com/live/flight/BA287")
+        _mock_approval(direct_vm, coverage_gen=200)
+        status = contract.judge_claim(claim_id="clm_1")
+        assert status == "approved"
+
+        pool = json.loads(contract.get_pool_status())
+        assert pool["total_payouts_paid_wei"] == str(200 * GEN_WEI)  # only B's amount -- A never paid out

@@ -162,17 +162,23 @@ import json as _json
 def mock_two_stage_judgment(direct_vm, facts: dict, intent: dict):
     """facts: the Stage A extraction result, e.g. {"is_cancelled": True,
     "delay_minutes": 240} or {"dry_days": 20, "rainfall_mm": 1}. Binding
-    fields (record_matches_flight/record_matches_location, is_within_window,
-    record_summary) default to "record matches, within window" so existing
-    callers that only care about the payout-relevant facts don't need to
-    know about the binding gate -- pass them explicitly (e.g.
-    record_matches_flight=False) to test binding-mismatch/expiry rejection.
+    fields (record_matches_flight/record_matches_location, record_date/
+    record_period_end, record_summary) default to "record matches, dated
+    well before any realistic test policy's expiry" so existing callers
+    that only care about the payout-relevant facts don't need to know about
+    the binding gate -- pass them explicitly (e.g. record_matches_flight=
+    False, or a record_date after the policy's expiry) to test
+    binding-mismatch/expiry rejection. The expiry check itself is plain
+    Python string comparison in the contract (_is_iso_date_on_or_before),
+    not something this mock controls -- it only supplies the record's
+    reported date.
     intent: the Stage B result, e.g. {"approved": True, "payout_amount": 500,
     "confidence": "0.95", "reasoning": "..."}."""
     facts = dict(facts)
     facts.setdefault("record_matches_flight", True)
     facts.setdefault("record_matches_location", True)
-    facts.setdefault("is_within_window", True)
+    facts.setdefault("record_date", "2020-01-01")
+    facts.setdefault("record_period_end", "2020-01-01")
     facts.setdefault("record_summary", "Verified record matches the policy's stored details.")
     direct_vm.clear_mocks()
     direct_vm.mock_llm(r"extracting objective facts only", _json.dumps(facts))

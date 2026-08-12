@@ -290,7 +290,7 @@ class TestPromptInjectionHardening:
         direct_vm.clear_mocks()
         direct_vm.mock_llm(
             r"extracting objective facts only",
-            json.dumps({"record_matches_flight": True, "is_within_window": True, "is_cancelled": False, "delay_minutes": 30}),
+            json.dumps({"record_matches_flight": True, "record_date": "2026-09-12", "is_cancelled": False, "delay_minutes": 30}),
         )
         direct_vm.mock_llm(guardrail_pattern, json.dumps({"approved": False, "payout_amount": 0, "confidence": "0.9", "reasoning": "No independent evidence of cancellation."}))
 

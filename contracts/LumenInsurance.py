@@ -65,6 +65,36 @@ class LumenInsurance(gl.Contract):
         ids.append(new_id)
         return json.dumps(ids)
 
+    def _close_sibling_pending_claims(self, policy_id: str, exclude_claim_id: str, reason: str) -> None:
+        """Deterministic cleanup, called whenever a policy transitions to a
+        terminal state (paid via judge_claim/check_weather_trigger, or
+        cancelled via cancel_policy): any OTHER claim against the same
+        policy that is still "pending" can never legitimately be approved
+        afterward -- judge_claim's parent-policy-ACTIVE check would revert
+        any attempt to judge it anyway -- but leaving those claims sitting
+        in "pending" forever is misleading state. A claim that can never be
+        approved should say so explicitly, not look perpetually open to
+        anyone reading list_claims_by_policy/get_claim.
+
+        Iterates claim_ids and filters by policy_id per-claim; this
+        contract has no separate per-policy claim index, which is fine at
+        the scale free-text policy claims operate at (a handful of claims
+        per policy, not thousands)."""
+        ids = json.loads(self.claim_ids)
+        for cid in ids:
+            if cid == exclude_claim_id:
+                continue
+            if cid not in self.claims:
+                continue
+            rec = json.loads(self.claims[cid])
+            if rec.get("policy_id") != policy_id:
+                continue
+            if rec.get("status") != "pending":
+                continue
+            rec["status"] = "rejected"
+            rec["reasoning"] = reason
+            self.claims[cid] = json.dumps(rec)
+
     def _require_nonempty(self, value: str, error_code: str, max_len: int = 2000):
         if not value or not value.strip():
             raise gl.vm.UserError(error_code)
@@ -184,6 +214,36 @@ class LumenInsurance(gl.Contract):
         default False, never raising."""
         return value is True
 
+    def _is_iso_date_on_or_before(self, date_str: str, cutoff_str: str) -> bool:
+        """Deterministic date-ordering check using plain string comparison --
+        valid for ISO 8601 'YYYY-MM-DD' dates, where lexicographic order and
+        chronological order coincide. This is pure Python, no LLM judgment
+        and no stdlib datetime dependency: every date/expiry field this
+        contract stores is produced by the frontend's <input type="date">
+        (see CreatePolicyFlight.jsx / CreatePolicyWeather.jsx), which always
+        emits this exact format -- the frontend's own expiry-vs-flight-date
+        validation already relies on this same lexicographic property.
+
+        Verified constraint: GenVM's pinned SDK (v0.2.16) exposes no block
+        or message timestamp at all (gl.message has only contract_address/
+        sender_address/origin_address/value/chain_id -- confirmed by reading
+        the SDK source directly, not assumed). There is no "current time" a
+        contract can read deterministically in this runtime, so this checks
+        record-date-vs-policy-expiry ordering, not record-date-vs-wall-clock-
+        now -- see SECURITY.md's "Deterministic record binding and expiry"
+        section for what this does and does not guarantee.
+
+        Malformed (non-YYYY-MM-DD-shaped) input compares as False rather
+        than raising -- a shape the contract can't parse as a date is not
+        something it can trust as "on or before" anything."""
+        if not date_str or not cutoff_str:
+            return False
+        if len(date_str) != 10 or len(cutoff_str) != 10:
+            return False
+        if date_str[4] != '-' or date_str[7] != '-' or cutoff_str[4] != '-' or cutoff_str[7] != '-':
+            return False
+        return date_str <= cutoff_str
+
     def _coerce_confidence(self, value) -> float:
         # Confidence MUST be requested from the model as a quoted JSON string
         # ("0.85", not 0.85): GenVM calldata encoding has no float type, and
@@ -199,15 +259,21 @@ class LumenInsurance(gl.Contract):
 
     def _facts_match(self, leader_facts, validator_facts, policy_type: str) -> bool:
         """Leader/validator agreement now also covers the binding fields
-        (record_matches_*, is_within_window), not just the payout-relevant
-        numeric/boolean facts -- an independent extraction that disagrees on
-        whether the record even corresponds to this policy is exactly as
-        disqualifying as disagreeing on delay_minutes."""
+        (record_matches_*, record_date/record_period_end), not just the
+        payout-relevant numeric/boolean facts -- an independent extraction
+        that disagrees on whether the record even corresponds to this
+        policy, or on what date it reports, is exactly as disqualifying as
+        disagreeing on delay_minutes. record_date/record_period_end are
+        compared as exact strings (not tolerance-banded, unlike the numeric
+        facts below): the whole point of binding is that both independent
+        extractions name the SAME record, and a date is either the record's
+        real date or it isn't -- there's no meaningful "close enough" for
+        an identity check."""
         try:
             if policy_type == "flight":
                 if self._coerce_strict_bool(leader_facts.get("record_matches_flight")) != self._coerce_strict_bool(validator_facts.get("record_matches_flight")):
                     return False
-                if self._coerce_strict_bool(leader_facts.get("is_within_window")) != self._coerce_strict_bool(validator_facts.get("is_within_window")):
+                if leader_facts.get("record_date") != validator_facts.get("record_date"):
                     return False
                 if self._coerce_strict_bool(leader_facts.get("is_cancelled")) != self._coerce_strict_bool(validator_facts.get("is_cancelled")):
                     return False
@@ -217,7 +283,7 @@ class LumenInsurance(gl.Contract):
             if policy_type == "weather":
                 if self._coerce_strict_bool(leader_facts.get("record_matches_location")) != self._coerce_strict_bool(validator_facts.get("record_matches_location")):
                     return False
-                if self._coerce_strict_bool(leader_facts.get("is_within_window")) != self._coerce_strict_bool(validator_facts.get("is_within_window")):
+                if leader_facts.get("record_period_end") != validator_facts.get("record_period_end"):
                     return False
                 leader_days = self._coerce_int(leader_facts.get("dry_days"))
                 validator_days = self._coerce_int(validator_facts.get("dry_days"))
@@ -263,15 +329,18 @@ class LumenInsurance(gl.Contract):
                 f'for flight number "{bound["flight_number"]}" on date "{bound["flight_date"]}" -- '
                 'false if no such record can be found, or it is for a different flight number or '
                 'date), '
-                f'"is_within_window": (true only if that flight date is on or before the policy '
-                f'expiry "{bound["expiry"]}" -- false otherwise), '
+                '"record_date": (the ISO 8601 date, format "YYYY-MM-DD", of the verified flight record '
+                'you found -- this MUST be the record\'s own actual date, not a copy of the date given '
+                'above; empty string "" if no record found), '
                 '"delay_minutes": (a plain integer, 0 if not delayed or no record found), '
                 '"is_cancelled": (true or false; false if no record found), '
                 '"record_summary": (one short plain-string sentence describing the verified record, '
                 'or "no matching record found" if none exists)'
                 '}. delay_minutes must be a plain integer with no decimal point, ever. Do not '
                 "substitute any flight number or date other than the ones given above, even if the "
-                "claim description mentions a different one."
+                "claim description mentions a different one. Binding and expiry are enforced "
+                "deterministically by the contract from record_date -- report the record's true date "
+                "honestly, never the policy's own bound date as a shortcut."
             )
         else:
             schema_hint = (
@@ -279,14 +348,17 @@ class LumenInsurance(gl.Contract):
                 f'"record_matches_location": (true only if you can verify real weather/rainfall data '
                 f'for location "{bound["location"]}" over the period "{bound["period"]}" -- false if '
                 'no such record can be found, or it is for a different location or period), '
-                f'"is_within_window": (true only if that period falls on or before the policy expiry '
-                f'"{bound["expiry"]}" -- false otherwise), '
+                '"record_period_end": (the ISO 8601 date, format "YYYY-MM-DD", of the LAST day of the '
+                'verified weather/rainfall period you found -- this MUST be the record\'s own actual '
+                'end date, not a copy of the policy\'s expiry; empty string "" if no record found), '
                 '"dry_days": (a plain integer count of consecutive dry days, 0 if no record found), '
                 '"rainfall_mm": (a plain integer millimeters observed, 0 if no record found), '
                 '"record_summary": (one short plain-string sentence describing the verified record, '
                 'or "no matching record found" if none exists)'
                 '}. Both numeric fields must be plain integers with no decimal point, ever. Do not '
-                "substitute any location or period other than the ones given above."
+                "substitute any location or period other than the ones given above. Expiry is enforced "
+                "deterministically by the contract from record_period_end -- report the record's true "
+                "end date honestly, never the policy's own expiry as a shortcut."
             )
 
         def leader_fn():
@@ -314,14 +386,14 @@ class LumenInsurance(gl.Contract):
             if policy_type == "flight":
                 return {
                     "record_matches_flight": self._coerce_strict_bool(result.get("record_matches_flight")),
-                    "is_within_window": self._coerce_strict_bool(result.get("is_within_window")),
+                    "record_date": str(result.get("record_date", ""))[:10],
                     "delay_minutes": self._coerce_int(result.get("delay_minutes")),
                     "is_cancelled": self._coerce_strict_bool(result.get("is_cancelled")),
                     "record_summary": str(result.get("record_summary", ""))[:300],
                 }
             return {
                 "record_matches_location": self._coerce_strict_bool(result.get("record_matches_location")),
-                "is_within_window": self._coerce_strict_bool(result.get("is_within_window")),
+                "record_period_end": str(result.get("record_period_end", ""))[:10],
                 "dry_days": self._coerce_int(result.get("dry_days")),
                 "rainfall_mm": self._coerce_int(result.get("rainfall_mm")),
                 "record_summary": str(result.get("record_summary", ""))[:300],
@@ -458,6 +530,7 @@ class LumenInsurance(gl.Contract):
         policy_record["status"] = "cancelled"
         self.policies[policy_id] = json.dumps(policy_record)
         self.reserved_liability = u256(max(0, int(self.reserved_liability) - coverage_wei))
+        self._close_sibling_pending_claims(policy_id, exclude_claim_id="", reason="Rejected: policy was cancelled before this claim was judged.")
 
     @gl.public.view
     def get_policy(self, policy_id: str) -> str:
@@ -550,6 +623,21 @@ class LumenInsurance(gl.Contract):
         if caller not in (policy_record.get("owner"), self.owner):
             raise gl.vm.UserError("NOT_AUTHORIZED_TO_TRIGGER_JUDGMENT")
 
+        # Parent policy must still be ACTIVE, checked deterministically
+        # before any extraction/LLM work runs. Without this, a policy that
+        # was cancelled (or already paid via a sibling claim) after this
+        # claim was submitted could still be judged and, in the cancelled
+        # case, paid out against reserved_liability that was already
+        # released back to the pool. cancel_policy and judge_claim's own
+        # approved branch both close sibling pending claims (see
+        # _close_sibling_pending_claims), so in normal operation this
+        # mostly guards against a claim submitted in the same block as a
+        # cancellation/payout race -- but it's cheap and deterministic, so
+        # it's checked unconditionally rather than relied upon as a
+        # secondary defense only.
+        if policy_record.get("status") != "active":
+            raise gl.vm.UserError("POLICY_NOT_ACTIVE")
+
         policy_type = policy_record.get("type", "flight")
         token = self._fence_token(claim_id, claim_record["policy_id"])
 
@@ -587,18 +675,26 @@ class LumenInsurance(gl.Contract):
         facts = self._extract_claim_facts(policy_type, token, policy_text, description, evidence_urls, bound)
 
         # ---- Binding gate: Stage B's intent judgment may only run once the
-        # independently-verified record is confirmed to correspond to THIS
-        # policy's own stored identity fields and to still be within its
-        # expiry window. A malformed, missing, or wrong-typed binding field
-        # coerces to False (see _coerce_strict_bool) and fails this gate
-        # exactly like an explicit mismatch would -- there is no path from
-        # "the model didn't answer clearly" to a payout. ----
+        # independently-verified record is confirmed to exist AND, via pure
+        # deterministic Python (no LLM judgment involved), to be dated on or
+        # before the policy's own stored expiry. record_matches_* itself is
+        # still LLM-sourced (whether a real record exists at all is not
+        # something this contract can verify without asking a web-connected
+        # model -- see _extract_claim_facts' docstring), but expiry is now a
+        # plain string comparison (_is_iso_date_on_or_before) against the
+        # record's own reported date, not a boolean the model self-reports.
+        # A malformed, missing, or wrong-typed record_matches_* field
+        # coerces to False (see _coerce_strict_bool); an empty/malformed
+        # record_date fails the date comparison the same way -- there is no
+        # path from "the model didn't answer clearly" to a payout. ----
         record_matches = facts.get("record_matches_flight") if policy_type == "flight" else facts.get("record_matches_location")
-        within_window = facts.get("is_within_window")
-        if not record_matches or not within_window:
+        record_date = facts.get("record_date") if policy_type == "flight" else facts.get("record_period_end")
+        within_expiry = self._is_iso_date_on_or_before(record_date, bound["expiry"])
+        if not record_matches or not within_expiry:
             reasoning = (
                 "Rejected: " + (facts.get("record_summary") or "no matching verified record found") +
-                f" (record_matches={bool(record_matches)}, is_within_window={bool(within_window)})."
+                f" (record_matches={bool(record_matches)}, record_date={record_date!r}, "
+                f"expiry={bound['expiry']!r}, within_expiry={within_expiry})."
             )
             claim_record["status"] = "rejected"
             claim_record["reasoning"] = reasoning[:1000]
@@ -733,6 +829,16 @@ class LumenInsurance(gl.Contract):
             recipient = policy_record["owner"]
             _Recipient(Address(recipient)).emit_transfer(value=u256(coverage_wei))
 
+            # This policy is now settled -- any other claim against it that
+            # was still "pending" can never be legitimately approved
+            # afterward (the parent-policy-ACTIVE check above would revert
+            # any attempt to judge it), so close them explicitly rather
+            # than leaving misleading "pending" state behind.
+            self._close_sibling_pending_claims(
+                policy_record["id"], exclude_claim_id=claim_id,
+                reason="Rejected: sibling claim settled -- this policy has already been paid via another claim.",
+            )
+
         return claim_record["status"]
 
     @gl.public.write
@@ -776,8 +882,11 @@ class LumenInsurance(gl.Contract):
 
         # ---- Binding gate: same rule as judge_claim -- intent may only be
         # judged once the verified record is confirmed to match this
-        # policy's own location/period and to still be within its expiry. ----
-        if not facts.get("record_matches_location") or not facts.get("is_within_window"):
+        # policy's own location/period, and, via deterministic Python date
+        # comparison (not an LLM-self-reported boolean), to be dated on or
+        # before the policy's own stored expiry. ----
+        within_expiry = self._is_iso_date_on_or_before(facts.get("record_period_end"), bound["expiry"])
+        if not facts.get("record_matches_location") or not within_expiry:
             return json.dumps({
                 "triggered": False,
                 "reason": facts.get("record_summary") or "no matching verified weather record found",
@@ -881,6 +990,16 @@ class LumenInsurance(gl.Contract):
         self.pool_balance = u256(int(self.pool_balance) - coverage_wei)
         self.total_payouts_paid = u256(int(self.total_payouts_paid) + coverage_wei)
         _Recipient(Address(policy_record["owner"])).emit_transfer(value=u256(coverage_wei))
+
+        # Weather policies have no owner-submitted claim path today (see
+        # submit_claim), so there should never be a pending sibling here in
+        # practice -- called anyway for defense-in-depth/symmetry with
+        # judge_claim's settlement branch, and to stay correct if that ever
+        # changes.
+        self._close_sibling_pending_claims(
+            policy_id, exclude_claim_id=claim_id,
+            reason="Rejected: sibling claim settled -- this policy has already been paid via another claim.",
+        )
 
         return json.dumps({"triggered": True, "reason": reasoning, "claim_id": claim_id})
 

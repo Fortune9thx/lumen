@@ -19,14 +19,14 @@ Coverage is real, fund-backed insurance, not a simulation: premiums are paid in 
 **Intelligent contract** (`contracts/LumenInsurance.py`) — policies, claims, and a shared payout pool, with GenLayer's Equivalence Principle used for claim adjudication. Judgment runs as a bound extraction stage, a binding gate, then an intent stage:
 
 1. **Bound factual extraction** — objective facts only (flight delay minutes / cancellation, or dry-day count / rainfall), verified against the *exact* flight number/date or location/period stored on the policy — via an independent leader/validator agreement (`gl.vm.run_nondet_unsafe`).
-2. **Binding gate** — if the verified record doesn't match the policy's own stored identity fields, or falls outside its expiry window, judgment stops here. Rejected, no intent stage runs.
+2. **Binding gate** — if the verified record doesn't match the policy's own stored identity fields, judgment stops here. Expiry is checked deterministically (plain Python date comparison against the policy's own stored expiry, no LLM judgment involved) — GenVM exposes no wall-clock, so this compares the record's own reported date, not "now." Either failure rejects immediately; no intent stage runs.
 3. **Intent judgment** — an LLM call (`gl.eq_principle.prompt_non_comparative`) decides whether those already-agreed, already-bound facts satisfy the policy's plain-English intent, gated by a confidence threshold and strict JSON-boolean parsing before any payout is possible.
 
 **Frontend** (`src/`) — React + Vite + Tailwind, talking to the contract directly via `genlayer-js` (`src/lib/genlayer.js`). No backend, no database — every read and write goes straight to the chain.
 
 ```
 contracts/LumenInsurance.py        Intelligent contract: policies, claims, settlement pool
-tests/direct/                      gltest suite (74 tests)
+tests/direct/                      gltest suite (82 tests)
 src/pages/                         Landing + app pages (Dashboard, Create Policy, Claims, Wallet)
 src/lib/genlayer.js                genlayer-js client + typed contract call wrappers
 src/lib/WalletContext.jsx          Wallet connect state + chain-mismatch detection
@@ -78,7 +78,9 @@ Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet
 
 Full detail in [SECURITY.md](./SECURITY.md). In summary:
 
-- **Bound to the policy's own stored details** — fact extraction is verified against the exact flight number/date or location/period stored on the policy (never the claimant's free text), and a binding gate rejects immediately — before intent judgment ever runs — if the record doesn't match or falls outside the expiry window.
+- **Bound to the policy's own stored details, expiry enforced deterministically** — fact extraction is verified against the exact flight number/date or location/period stored on the policy (never the claimant's free text), and a binding gate rejects immediately — before intent judgment ever runs — if the record doesn't match, or if its own reported date falls after the policy's expiry (a plain Python string comparison, not an LLM-judged boolean).
+- **Terminal-state closure is proactive, not just blocked-on-attempt** — a policy that's paid or cancelled immediately closes every other still-pending claim against it (`"sibling claim settled"`/`"policy was cancelled"`), so there's never a dangling claim that looks judgeable but isn't.
+- **Per-policy reserve isolation** — every payout is sourced exclusively from the specific policy being judged's own reserved coverage amount; paying one policy's claim can never read, borrow, or affect another policy's stored reserve.
 - **One settlement path per product, no ambiguity** — flight is owner-submitted (`submit_claim` → `judge_claim`); weather is fully automatic and permissionless (`check_weather_trigger`, callable by anyone). Neither product can settle through the other's path.
 - **Two-stage, confidence-gated judgment** — a single hijacked LLM response can't buy a payout alone; it must survive independent fact-extraction agreement, clear a `CONFIDENCE_THRESHOLD` (0.85), report a payout amount consistent with the policy's own reserved coverage, and pass a deterministic Python backstop against the agreed facts.
 - **Strict JSON-boolean parsing** — `approved` and every other critical boolean field must be a real JSON `true`/`false`; a string, number, or missing value is never coerced into an approval the way Python's own permissive `bool()` would allow.

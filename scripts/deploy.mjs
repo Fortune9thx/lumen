@@ -22,6 +22,7 @@ const client = createClient({ chain, account })
 const contractCode = readFileSync(resolve(__dirname, '../contracts/LumenInsurance.py'), 'utf-8')
 
 console.log(`Deploying LumenInsurance to ${chainName} from ${account.address}...`)
+console.log(`Contract source size: ${Buffer.byteLength(contractCode, 'utf-8')} bytes`)
 
 const hash = await client.deployContract({ code: contractCode, args: [] })
 console.log('Deploy tx:', hash)

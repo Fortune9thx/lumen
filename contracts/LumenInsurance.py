@@ -6,18 +6,11 @@ import json
 from genlayer import *
 
 GEN_WEI = 1000000000000000000
-# Stage B (intent judgment) must clear this bar to ever pay out. Kept as a
-# top-level constant so it's easy to tune without hunting through judge_claim.
-# 0.85 is a deliberately high bar: fail-closed by default, only pay when the
-# model itself signals it is confident.
+# Stage B must clear this bar to pay out. Fail-closed by default.
 CONFIDENCE_THRESHOLD = 0.85
-# Sanity ceiling on any single GEN amount (coverage, premium, or withdrawal),
-# independent of u256's real bit width. gltest's direct-mode u256 shim does
-# NOT enforce 256-bit overflow (confirmed by probing it directly — a
-# coverage_amount_gen of 2**250 sailed through the *GEN_WEI multiplication
-# with no error), so this cannot be verified safe by testing alone. Bounding
-# every amount well below any realistic policy removes the overflow question
-# entirely rather than trusting unverified SDK/runtime internals.
+# Ceiling on any single GEN amount. gltest's u256 shim doesn't enforce real
+# 256-bit overflow (verified by probing: 2**250 sailed through unchecked),
+# so this bounds the arithmetic instead of trusting the runtime.
 MAX_GEN_AMOUNT = 10 ** 15
 
 
@@ -66,20 +59,9 @@ class LumenInsurance(gl.Contract):
         return json.dumps(ids)
 
     def _close_sibling_pending_claims(self, policy_id: str, exclude_claim_id: str, reason: str) -> None:
-        """Deterministic cleanup, called whenever a policy transitions to a
-        terminal state (paid via judge_claim/check_weather_trigger, or
-        cancelled via cancel_policy): any OTHER claim against the same
-        policy that is still "pending" can never legitimately be approved
-        afterward -- judge_claim's parent-policy-ACTIVE check would revert
-        any attempt to judge it anyway -- but leaving those claims sitting
-        in "pending" forever is misleading state. A claim that can never be
-        approved should say so explicitly, not look perpetually open to
-        anyone reading list_claims_by_policy/get_claim.
-
-        Iterates claim_ids and filters by policy_id per-claim; this
-        contract has no separate per-policy claim index, which is fine at
-        the scale free-text policy claims operate at (a handful of claims
-        per policy, not thousands)."""
+        # Called when a policy is paid or cancelled: closes every OTHER
+        # still-pending claim on it, so no claim is left looking judgeable
+        # when it can never legitimately be approved again.
         ids = json.loads(self.claim_ids)
         for cid in ids:
             if cid == exclude_claim_id:
@@ -110,28 +92,15 @@ class LumenInsurance(gl.Contract):
             raise gl.vm.UserError("NOT_OWNER")
 
     def _sanitize_evidence(self, value: str, max_len: int = 1000) -> str:
-        """Hardens attacker-controlled text before it is interpolated into the
-        judgment prompt. Stripping '<', '>', '{', '}', and backticks (plus
-        control/newline characters, collapsed to spaces) removes the ability
-        to forge tag/markdown/code-fence boundaries independent of the
-        prompt's own wording.
-
-        Also strips the literal substring 'fence-' (case-insensitive): the
-        judgment prompt fences user content with a per-claim token
-        (FENCE-<token>-START/END, see _fence_token), and that token is NOT
-        cryptographically secret -- it's derived from claim_id/policy_id,
-        both small sequential identifiers a claimant can read (or predict
-        from the public claim_count) *before* writing their submit_claim
-        description. A claimant who computes their own upcoming claim_id
-        could otherwise pre-compute the exact token and embed a literal
-        'FENCE-<predicted-token>-END' to forge a fence close early. Removing
-        every occurrence of the marker prefix itself closes this regardless
-        of whether the token was guessed correctly -- the token provides
-        defense-in-depth against copy-paste-style attempts, but this
-        stripping is the actual security boundary, not the token's secrecy.
-
-        Only used for the prompt copy -- the stored record keeps the
-        claimant's original text for transparency."""
+        # Strips '<','>','{','}',backticks, and control chars from the
+        # prompt-bound copy (stored record keeps the original) to close
+        # tag/markdown/code-fence breakout attempts. Also strips every
+        # literal "fence-" occurrence (case-insensitive): the fence token
+        # (see _fence_token) is derived from claim_id/policy_id, both
+        # small public sequential IDs a claimant could predict in advance
+        # and use to forge an early fence close -- stripping the marker
+        # prefix itself is the actual security boundary, not the token's
+        # secrecy.
         cleaned = []
         for ch in value:
             if ch in "{}`<>":
@@ -143,10 +112,8 @@ class LumenInsurance(gl.Contract):
             else:
                 cleaned.append(ch)
         result = "".join(cleaned)
-        # Manual case-insensitive removal of every "fence-" occurrence (no
-        # `re` import: no other contract in this project uses it, and
-        # avoiding an unverified stdlib dependency this close to a live
-        # deploy is worth a few extra lines of plain string logic).
+        # No `re` import: avoiding an unverified stdlib dependency this
+        # close to a live deploy is worth a few extra lines of plain logic.
         lowered = result.lower()
         marker = "fence-"
         out = []
@@ -182,16 +149,9 @@ class LumenInsurance(gl.Contract):
         return u256(pool - reserved)
 
     def _fence_token(self, claim_id: str, policy_id: str) -> str:
-        """Deterministic (same value on every validator, not real entropy --
-        genuine randomness inside a nondet-wrapped block would risk differing
-        per node) but unpredictable-at-authoring-time fence token: derived
-        from claim_id + policy_id, both of which are assigned by the contract
-        only at submission time, after the claimant already wrote their
-        description. A claimant can no longer pre-compute the exact fence
-        text needed to forge a matching close-fence and break out, the way
-        they could with the fixed '<policy>'/'<claim_description>' tags
-        alone. Used as an additional layer on top of (not instead of)
-        _sanitize_evidence's character stripping."""
+        # Deterministic (same on every validator) but unpredictable at
+        # authoring time: derived from claim_id+policy_id, both assigned
+        # only at submission, after the claimant already wrote their text.
         return hashlib.sha256(f"{claim_id}:{policy_id}".encode()).hexdigest()[:16]
 
     def _coerce_int(self, value, default: int = 0) -> int:
@@ -201,41 +161,22 @@ class LumenInsurance(gl.Contract):
             return default
 
     def _coerce_strict_bool(self, value) -> bool:
-        """Strict JSON-boolean coercion for any field the contract treats as a
-        payout-relevant decision (is_cancelled, record_matches_*,
-        is_within_window, and -- via the explicit isinstance check at its own
-        call site in judge_claim/check_weather_trigger -- approved). Python's
-        own bool() is too permissive for this: bool("false") is True,
-        bool(1) is True, bool("no") is True. A non-boolean value (string,
-        number, null, missing) must never silently become an
-        approval-favoring True. Only the literal JSON boolean `true` --
-        which json.loads / exec_prompt's auto-parse turns into Python's
-        `True` -- passes; every other type or value coerces to the safe
-        default False, never raising."""
+        # Python's bool() is too permissive (bool("false") is True,
+        # bool(1) is True) to trust for payout-relevant decisions. Only the
+        # literal JSON boolean `true` passes; everything else is False.
         return value is True
 
     def _is_iso_date_on_or_before(self, date_str: str, cutoff_str: str) -> bool:
-        """Deterministic date-ordering check using plain string comparison --
-        valid for ISO 8601 'YYYY-MM-DD' dates, where lexicographic order and
-        chronological order coincide. This is pure Python, no LLM judgment
-        and no stdlib datetime dependency: every date/expiry field this
-        contract stores is produced by the frontend's <input type="date">
-        (see CreatePolicyFlight.jsx / CreatePolicyWeather.jsx), which always
-        emits this exact format -- the frontend's own expiry-vs-flight-date
-        validation already relies on this same lexicographic property.
-
-        Verified constraint: GenVM's pinned SDK (v0.2.16) exposes no block
-        or message timestamp at all (gl.message has only contract_address/
-        sender_address/origin_address/value/chain_id -- confirmed by reading
-        the SDK source directly, not assumed). There is no "current time" a
-        contract can read deterministically in this runtime, so this checks
-        record-date-vs-policy-expiry ordering, not record-date-vs-wall-clock-
-        now -- see SECURITY.md's "Deterministic record binding and expiry"
-        section for what this does and does not guarantee.
-
-        Malformed (non-YYYY-MM-DD-shaped) input compares as False rather
-        than raising -- a shape the contract can't parse as a date is not
-        something it can trust as "on or before" anything."""
+        # Deterministic date ordering via string comparison -- valid for
+        # ISO 8601 "YYYY-MM-DD" (lexicographic == chronological). Every
+        # date field here comes from <input type="date">. No datetime
+        # import needed. GenVM's pinned SDK (v0.2.16) exposes no block/
+        # message timestamp at all (gl.message has only contract_address/
+        # sender_address/origin_address/value/chain_id -- confirmed by
+        # reading the SDK source), so there is no deterministic "now" a
+        # contract can read; this compares the record's own reported date
+        # against the policy's stored expiry, not against wall-clock time.
+        # Malformed input compares False rather than raising.
         if not date_str or not cutoff_str:
             return False
         if len(date_str) != 10 or len(cutoff_str) != 10:
@@ -245,30 +186,19 @@ class LumenInsurance(gl.Contract):
         return date_str <= cutoff_str
 
     def _coerce_confidence(self, value) -> float:
-        # Confidence MUST be requested from the model as a quoted JSON string
-        # ("0.85", not 0.85): GenVM calldata encoding has no float type, and
-        # gl.nondet.exec_prompt(response_format="json") auto-parses the raw
-        # model JSON, so a bare numeric decimal in the model's own output
-        # becomes a Python float and blows up at the calldata boundary the
-        # instant it crosses a gl_call. Parsing it ourselves after decode
-        # sidesteps that entirely.
+        # Confidence must be requested as a quoted JSON string ("0.85"):
+        # GenVM calldata has no float type, and exec_prompt's JSON
+        # auto-parse would turn a bare decimal into a Python float that
+        # blows up at the next gl_call boundary.
         try:
             return max(0.0, min(1.0, float(value)))
         except (TypeError, ValueError):
             return 0.0
 
     def _facts_match(self, leader_facts, validator_facts, policy_type: str) -> bool:
-        """Leader/validator agreement now also covers the binding fields
-        (record_matches_*, record_date/record_period_end), not just the
-        payout-relevant numeric/boolean facts -- an independent extraction
-        that disagrees on whether the record even corresponds to this
-        policy, or on what date it reports, is exactly as disqualifying as
-        disagreeing on delay_minutes. record_date/record_period_end are
-        compared as exact strings (not tolerance-banded, unlike the numeric
-        facts below): the whole point of binding is that both independent
-        extractions name the SAME record, and a date is either the record's
-        real date or it isn't -- there's no meaningful "close enough" for
-        an identity check."""
+        # Leader/validator must agree on binding fields too, not just the
+        # payout-relevant numbers -- record_date/record_period_end compare
+        # as exact strings (identity, not tolerance-banded).
         try:
             if policy_type == "flight":
                 if self._coerce_strict_bool(leader_facts.get("record_matches_flight")) != self._coerce_strict_bool(validator_facts.get("record_matches_flight")):
@@ -295,33 +225,20 @@ class LumenInsurance(gl.Contract):
             return False
 
     def _extract_claim_facts(self, policy_type: str, token: str, policy_text: str, description: str, evidence_urls: str, bound: dict):
-        """Stage A -- BOUND factual extraction, kept strictly separate from
-        Stage B's intent judgment. `bound` carries the policy's own stored
-        identity fields (flight_number/flight_date/expiry, or
-        location/period/expiry) -- sourced from the policy record, never
-        from claimant-supplied text -- and the model is explicitly required
-        to verify a real record against exactly those values, not whatever
-        the claim description happens to say. record_matches_flight /
-        record_matches_location and is_within_window are the binding-gate
-        fields judge_claim (and check_weather_trigger) check BEFORE ever
-        running Stage B's intent judgment -- see the "Binding gate" comment
-        at each call site.
-
-        Uses gl.vm.run_nondet_unsafe with an explicit leader/validator pair
-        (the same pattern GenLayer's own reference contracts use for
-        external-data agreement): the leader extracts structured facts, and
-        an independent validator call must land within numeric tolerance
-        AND agree on every binding field (see _facts_match) or consensus on
-        this step fails.
-
-        Honest limitation: because Lumen's policies are free-text (not a
-        fixed registry of parameterized products with a canonical price
-        feed like Binance), there is no deterministic ground-truth API to
-        strict_eq against here the way e.g. a price oracle would allow --
-        the 'strict' half of this stage is strict *agreement between
-        independent extractions*, not strict comparison against a fixed
-        external source. This is disclosed in SECURITY.md rather than
-        overstated as literal strict_eq certainty."""
+        # Stage A -- bound factual extraction, kept separate from Stage B's
+        # intent judgment. `bound` is the policy's own stored identity
+        # fields (never claimant text); the model must verify a real
+        # record against exactly those values and report record_date/
+        # record_period_end as the record's OWN date, which judge_claim/
+        # check_weather_trigger then check deterministically against the
+        # policy's expiry (see _is_iso_date_on_or_before). Uses
+        # gl.vm.run_nondet_unsafe with an explicit leader/validator pair:
+        # the validator independently re-extracts and must agree (see
+        # _facts_match) or consensus fails. Honest limitation: Lumen's
+        # policies are free-text, so there's no fixed ground-truth API to
+        # strict_eq against -- "strict" here means strict agreement
+        # between independent extractions, not comparison to a canonical
+        # external source (see SECURITY.md).
         if policy_type == "flight":
             schema_hint = (
                 'Return strict JSON only: {'
@@ -470,13 +387,9 @@ class LumenInsurance(gl.Contract):
         premium_gen: u256,
         expiry: str,
     ) -> str:
-        """Signature change: `expiry` is now a required parameter (previously
-        weather policies had no explicit expiry, only a free-text `period`
-        description). Binding checks in check_weather_trigger need a strict
-        cutoff to verify weather records fall on or before -- `period` alone
-        is descriptive free text, not something the contract or a caller can
-        rely on for a deterministic window boundary. See SECURITY.md's
-        "Binding to stored policy details" section."""
+        # `expiry` is required (weather previously had only a free-text
+        # `period`) -- the binding gate needs a strict cutoff, and `period`
+        # alone isn't reliably parseable as one. See SECURITY.md.
         self._require_not_paused()
         self._require_nonempty(location, "INVALID_LOCATION", max_len=200)
         self._require_nonempty(period, "INVALID_PERIOD", max_len=100)
@@ -552,12 +465,9 @@ class LumenInsurance(gl.Contract):
 
     @gl.public.write
     def submit_claim(self, policy_id: str, description: str, evidence_urls: str) -> str:
-        """Flight policies only. Weather policies settle exclusively through
-        check_weather_trigger's automatic parametric path -- there is
-        deliberately no owner-submitted claim route for weather, so there is
-        never ambiguity between an "advertised automatic" trigger and a
-        parallel manual path that could also pay out the same policy twice
-        via two different pipelines. See SECURITY.md's "Claim flows" table."""
+        # Flight only. Weather settles exclusively via check_weather_trigger
+        # -- no parallel manual path, so there's never ambiguity about which
+        # pipeline could pay out a weather policy. See SECURITY.md.
         self._require_not_paused()
         if policy_id not in self.policies:
             raise gl.vm.UserError("POLICY_NOT_FOUND")
@@ -590,27 +500,14 @@ class LumenInsurance(gl.Contract):
 
     @gl.public.write
     def judge_claim(self, claim_id: str) -> str:
-        """Two-stage judgment, hardened against a hypothetical future universal
-        jailbreak (a novel prompt-injection every validator's LLM falls for
-        identically, which GenLayer's equivalence principle cannot itself
-        distinguish from genuine agreement -- see SECURITY.md's "Residual
-        risk" note).
-
-        Stage A (_extract_claim_facts): pulls objective facts only
-        (delay_minutes/is_cancelled, or dry_days/rainfall_mm) via
-        gl.vm.run_nondet_unsafe with an independent leader/validator
-        extraction pair that must agree within numeric tolerance.
-
-        Stage B (judge_intent, below): receives Stage A's already-agreed
-        facts plus the sanitized policy/claim text, and must return a
-        decision with a confidence score. A single hijacked response can no
-        longer buy a payout by itself -- it also has to (a) survive Stage A's
-        independent-extraction agreement, (b) claim high confidence, which is
-        itself part of what a validator's equivalence check can reject as
-        implausible, and (c) stay consistent with Stage A's facts via the
-        deterministic backstop below. This raises the cost of a successful
-        attack without pretending the residual risk is fully eliminated.
-        """
+        # Two-stage judgment: Stage A (_extract_claim_facts) extracts
+        # objective, record-bound facts via an independent leader/validator
+        # pair; Stage B (judge_intent, below) judges intent against those
+        # already-agreed facts. A single hijacked response can't buy a
+        # payout alone -- it must survive Stage A's agreement, clear
+        # CONFIDENCE_THRESHOLD, and stay consistent with Stage A's facts via
+        # the deterministic backstop below. See SECURITY.md for the full
+        # threat model and residual-risk disclosure.
         self._require_not_paused()
         if claim_id not in self.claims:
             raise gl.vm.UserError("CLAIM_NOT_FOUND")
@@ -623,41 +520,25 @@ class LumenInsurance(gl.Contract):
         if caller not in (policy_record.get("owner"), self.owner):
             raise gl.vm.UserError("NOT_AUTHORIZED_TO_TRIGGER_JUDGMENT")
 
-        # Parent policy must still be ACTIVE, checked deterministically
-        # before any extraction/LLM work runs. Without this, a policy that
-        # was cancelled (or already paid via a sibling claim) after this
-        # claim was submitted could still be judged and, in the cancelled
-        # case, paid out against reserved_liability that was already
-        # released back to the pool. cancel_policy and judge_claim's own
-        # approved branch both close sibling pending claims (see
-        # _close_sibling_pending_claims), so in normal operation this
-        # mostly guards against a claim submitted in the same block as a
-        # cancellation/payout race -- but it's cheap and deterministic, so
-        # it's checked unconditionally rather than relied upon as a
-        # secondary defense only.
+        # Parent policy must still be active, checked deterministically
+        # before any extraction/LLM work. Sibling-claim closing (below)
+        # makes this mostly unreachable in normal operation, but it's cheap
+        # defense-in-depth against any future path that skips it.
         if policy_record.get("status") != "active":
             raise gl.vm.UserError("POLICY_NOT_ACTIVE")
 
         policy_type = policy_record.get("type", "flight")
         token = self._fence_token(claim_id, claim_record["policy_id"])
 
-        # Sanitized copies for the prompt only -- the stored claim/policy
-        # records keep the claimant's original text untouched for the
-        # transparency/audit trail. '<', '>', '{', '}', backticks, and
-        # control characters are stripped so a claimant can't forge fence
-        # boundaries or markdown/code-fence breakouts; the per-claim fence
-        # token (unknown to the claimant at authoring time, since claim_id
-        # is only assigned at submission) is a second, independent layer on
-        # top of that character stripping.
+        # Sanitized copies for the prompt only -- stored records keep the
+        # original text for the audit trail.
         policy_text = self._sanitize_evidence(policy_record.get("coverage_text", ""))
         description = self._sanitize_evidence(claim_record.get("description", ""))
         evidence_urls = self._sanitize_evidence(claim_record.get("evidence_urls", ""))
 
-        # Bound identity fields the extraction MUST verify against -- these
-        # come from the POLICY record (set once at creation by the
-        # policyholder paying the premium), never from the claimant's own
-        # free-text claim description. Still sanitized: the policy creator
-        # is also an untrusted party from the prompt's point of view.
+        # Bound identity fields the extraction must verify against, sourced
+        # from the policy record (never the claimant's text) and sanitized
+        # the same way, since the policy creator is untrusted too.
         if policy_type == "flight":
             bound = {
                 "flight_number": self._sanitize_evidence(policy_record.get("flight_number", ""), max_len=50),
@@ -671,22 +552,14 @@ class LumenInsurance(gl.Contract):
                 "expiry": self._sanitize_evidence(policy_record.get("expiry", ""), max_len=50),
             }
 
-        # ---- Stage A: bound factual extraction (independent leader/validator agreement) ----
+        # ---- Stage A: bound factual extraction ----
         facts = self._extract_claim_facts(policy_type, token, policy_text, description, evidence_urls, bound)
 
-        # ---- Binding gate: Stage B's intent judgment may only run once the
-        # independently-verified record is confirmed to exist AND, via pure
-        # deterministic Python (no LLM judgment involved), to be dated on or
-        # before the policy's own stored expiry. record_matches_* itself is
-        # still LLM-sourced (whether a real record exists at all is not
-        # something this contract can verify without asking a web-connected
-        # model -- see _extract_claim_facts' docstring), but expiry is now a
-        # plain string comparison (_is_iso_date_on_or_before) against the
-        # record's own reported date, not a boolean the model self-reports.
-        # A malformed, missing, or wrong-typed record_matches_* field
-        # coerces to False (see _coerce_strict_bool); an empty/malformed
-        # record_date fails the date comparison the same way -- there is no
-        # path from "the model didn't answer clearly" to a payout. ----
+        # ---- Binding gate: Stage B may only run once record_matches_* is
+        # confirmed AND the record's own date is deterministically on/before
+        # the policy's stored expiry (_is_iso_date_on_or_before -- plain
+        # Python, not an LLM judgment). A malformed/missing field coerces to
+        # False, same as an explicit mismatch. ----
         record_matches = facts.get("record_matches_flight") if policy_type == "flight" else facts.get("record_matches_location")
         record_date = facts.get("record_date") if policy_type == "flight" else facts.get("record_period_end")
         within_expiry = self._is_iso_date_on_or_before(record_date, bound["expiry"])
@@ -741,9 +614,7 @@ class LumenInsurance(gl.Contract):
                 "facts and policy text."
             ),
         )
-        # Malformed/non-JSON judgment output, or output missing the required
-        # shape, must fail closed -- never silently crash the transaction or
-        # default to an approval.
+        # Malformed/non-JSON output must fail closed, never crash or default approve.
         safe_default = {"approved": False, "payout_amount": 0, "confidence": "0.0", "reasoning": "Judgment output was malformed; claim rejected as a safe default."}
         try:
             outcome = json.loads(outcome_str)
@@ -758,12 +629,8 @@ class LumenInsurance(gl.Contract):
         if not isinstance(reasoning, str):
             reasoning = str(reasoning)
 
-        # Strict boolean parsing: `approved` must be an actual JSON boolean.
-        # Python's bool() is too permissive -- bool("false") is True,
-        # bool(1) is True -- so a string, number, null, or missing value is
-        # NOT silently coerced into an approval. Any type other than a real
-        # bool is malformed and forces approved=False with an explicit
-        # rejection reason, never a default approval.
+        # `approved` must be a real JSON boolean -- Python's bool() would
+        # treat "false"/1 as truthy, so any non-bool type is malformed.
         approved_raw = outcome.get("approved", False)
         rejection_reasons = []
         if isinstance(approved_raw, bool):
@@ -778,11 +645,9 @@ class LumenInsurance(gl.Contract):
             approved = False
             rejection_reasons.append(f"confidence {confidence:.2f} below required {CONFIDENCE_THRESHOLD:.2f}")
 
-        # payout_amount is never trusted to control the actual transfer (that
-        # would be a payment-amount injection vector) -- it's used only as a
-        # consistency signal. The real transfer always uses the policy's own
-        # pre-agreed, pre-reserved coverage_amount_wei, set at policy
-        # creation time, never anything the LLM outputs here.
+        # payout_amount is a consistency signal only, never trusted to set
+        # the transfer amount -- that always comes from the policy's own
+        # pre-reserved coverage_amount_wei.
         coverage_wei = int(policy_record.get("coverage_amount_wei", "0"))
         coverage_gen = coverage_wei // GEN_WEI if coverage_wei > 0 else 0
         if approved and payout_amount_gen != coverage_gen:
@@ -791,10 +656,8 @@ class LumenInsurance(gl.Contract):
                 f"payout_amount {payout_amount_gen} inconsistent with policy coverage {coverage_gen}"
             )
 
-        # Deterministic backstop: if Stage A's independently-agreed facts are
-        # unambiguously negative, force rejection regardless of what Stage B
-        # claims -- this can't be talked around by Stage B's prompt alone,
-        # since it's plain Python comparison against already-agreed values.
+        # Deterministic backstop: unambiguously negative Stage A facts force
+        # rejection regardless of Stage B, via plain comparison.
         if policy_type == "flight" and not facts.get("is_cancelled") and self._coerce_int(facts.get("delay_minutes")) <= 0:
             approved = False
             rejection_reasons.append("verified facts show no cancellation and no delay")
@@ -829,11 +692,7 @@ class LumenInsurance(gl.Contract):
             recipient = policy_record["owner"]
             _Recipient(Address(recipient)).emit_transfer(value=u256(coverage_wei))
 
-            # This policy is now settled -- any other claim against it that
-            # was still "pending" can never be legitimately approved
-            # afterward (the parent-policy-ACTIVE check above would revert
-            # any attempt to judge it), so close them explicitly rather
-            # than leaving misleading "pending" state behind.
+            # Policy is now settled -- close any other pending sibling claim.
             self._close_sibling_pending_claims(
                 policy_record["id"], exclude_claim_id=claim_id,
                 reason="Rejected: sibling claim settled -- this policy has already been paid via another claim.",
@@ -843,23 +702,15 @@ class LumenInsurance(gl.Contract):
 
     @gl.public.write
     def check_weather_trigger(self, policy_id: str) -> str:
-        """Permissionless automatic parametric trigger for weather policies --
-        anyone (a keeper bot, the policy owner, or any third party) may call
-        this at any time; no claim submission is required. This is the ONE
-        real automatic-settlement path Lumen implements (flight policies
-        remain owner-submitted via submit_claim + judge_claim, since a
-        flight claim needs a human to actually be affected and to supply
-        supporting evidence -- weather is a pure parametric trigger with no
-        analogous claimant role). See SECURITY.md's "Claim flows" table.
-
-        Runs the same bound extraction + binding-gate + intent-judgment
-        pipeline judge_claim uses, but sourced entirely from the policy's
-        own stored location/period/expiry/coverage_text -- there is no
-        claimant-submitted description or evidence to read. If the
-        independently-verified facts satisfy the policy, it settles in this
-        same call; if not, it is a pure no-op (no state change, no claim
-        record created, no claim_id consumed) so it can be polled
-        repeatedly -- e.g. daily by a keeper -- without side effects."""
+        # Permissionless automatic parametric trigger for weather policies
+        # -- anyone may call this at any time, no claim submission needed.
+        # This is the ONE automatic-settlement path Lumen implements
+        # (flight remains owner-submitted via submit_claim+judge_claim,
+        # since a flight claim needs a human affected party). Runs the same
+        # bound extraction + binding-gate + intent pipeline as judge_claim,
+        # sourced entirely from the policy's own stored fields. If facts
+        # satisfy the policy it settles here; otherwise it's a pure no-op
+        # (no state change, no claim record) so it can be polled repeatedly.
         self._require_not_paused()
         if policy_id not in self.policies:
             raise gl.vm.UserError("POLICY_NOT_FOUND")
@@ -880,11 +731,7 @@ class LumenInsurance(gl.Contract):
         # ---- Stage A: bound factual extraction -- no claimant text involved ----
         facts = self._extract_claim_facts("weather", token, policy_text, "", "", bound)
 
-        # ---- Binding gate: same rule as judge_claim -- intent may only be
-        # judged once the verified record is confirmed to match this
-        # policy's own location/period, and, via deterministic Python date
-        # comparison (not an LLM-self-reported boolean), to be dated on or
-        # before the policy's own stored expiry. ----
+        # ---- Binding gate: same rule as judge_claim, deterministic expiry ----
         within_expiry = self._is_iso_date_on_or_before(facts.get("record_period_end"), bound["expiry"])
         if not facts.get("record_matches_location") or not within_expiry:
             return json.dumps({
@@ -892,9 +739,7 @@ class LumenInsurance(gl.Contract):
                 "reason": facts.get("record_summary") or "no matching verified weather record found",
             })
 
-        # Deterministic pre-check on Stage A's own agreed facts, mirroring
-        # judge_claim's backstop -- skip spending a Stage-B call entirely if
-        # there's no dry-day streak at all.
+        # Skip Stage B entirely if there's no dry-day streak at all.
         if self._coerce_int(facts.get("dry_days")) <= 0:
             return json.dumps({"triggered": False, "reason": "verified facts show no dry-day streak"})
 
@@ -943,8 +788,7 @@ class LumenInsurance(gl.Contract):
         if not isinstance(outcome, dict):
             outcome = safe_default
 
-        # Strict boolean parsing, same rule as judge_claim: only a real JSON
-        # boolean is honored, anything else is malformed and forces False.
+        # Strict boolean parsing, same rule as judge_claim.
         approved_raw = outcome.get("approved", False)
         approved = approved_raw if isinstance(approved_raw, bool) else False
         confidence = self._coerce_confidence(outcome.get("confidence", 0))
@@ -991,11 +835,8 @@ class LumenInsurance(gl.Contract):
         self.total_payouts_paid = u256(int(self.total_payouts_paid) + coverage_wei)
         _Recipient(Address(policy_record["owner"])).emit_transfer(value=u256(coverage_wei))
 
-        # Weather policies have no owner-submitted claim path today (see
-        # submit_claim), so there should never be a pending sibling here in
-        # practice -- called anyway for defense-in-depth/symmetry with
-        # judge_claim's settlement branch, and to stay correct if that ever
-        # changes.
+        # No owner-submitted claim path exists for weather today, so there
+        # should never be a pending sibling -- called for symmetry/safety.
         self._close_sibling_pending_claims(
             policy_id, exclude_claim_id=claim_id,
             reason="Rejected: sibling claim settled -- this policy has already been paid via another claim.",

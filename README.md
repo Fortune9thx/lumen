@@ -3,9 +3,7 @@
 **Insurance written in language. Claims judged by decentralized AI. Settled in minutes on GenLayer.**
 
 **Live app:** [lumen-x9.vercel.app](https://lumen-x9.vercel.app)
-**Live contract (Bradbury):** [`0x43e148dD805625f9eEBb2FC66D46fd56d78CA28d`](https://explorer-bradbury.genlayer.com/address/0x43e148dD805625f9eEBb2FC66D46fd56d78CA28d)
-
-> **Pending redeploy:** the fetch-and-authenticate change described below (Stage A now calls FlightAware/Open-Meteo directly via `gl.nondet.web.render`) is committed to `contracts/LumenInsurance.py` and fully covered by `gltest`, but has not yet been redeployed to the address above, pending a real judged claim confirming Bradbury's validators can actually reach those external hosts in production — see SECURITY.md's "Known limitations" #5. The currently live contract still runs the prior (binding-gate-without-fetch) revision.
+**Live contract (Bradbury):** [`0x8c129Eb996DfAE00bdCDC3f1fffA5B3442a12a1C`](https://explorer-bradbury.genlayer.com/address/0x8c129Eb996DfAE00bdCDC3f1fffA5B3442a12a1C)
 
 ## What Lumen does
 
@@ -71,7 +69,7 @@ Set `.env` from `.env.example`:
 
 ```bash
 VITE_GENLAYER_CHAIN=bradbury
-VITE_LUMEN_CONTRACT_ADDRESS=0x43e148dD805625f9eEBb2FC66D46fd56d78CA28d
+VITE_LUMEN_CONTRACT_ADDRESS=0x8c129Eb996DfAE00bdCDC3f1fffA5B3442a12a1C
 ```
 
 Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, Rabby, etc.) funded with Bradbury testnet GEN — the app discovers your wallet via EIP-6963 and handles network switching (including adding the chain if your wallet doesn't know it yet) automatically. To deploy your own instance instead, see `SECURITY.md` and the `scripts/deploy.mjs` → `check-deploy.mjs` → `probe-contract.mjs` flow (never trust a receipt alone — always read-verify a fresh deploy).

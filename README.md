@@ -5,6 +5,8 @@
 **Live app:** [lumen-x9.vercel.app](https://lumen-x9.vercel.app)
 **Live contract (Bradbury):** [`0x43e148dD805625f9eEBb2FC66D46fd56d78CA28d`](https://explorer-bradbury.genlayer.com/address/0x43e148dD805625f9eEBb2FC66D46fd56d78CA28d)
 
+> **Pending redeploy:** the fetch-and-authenticate change described below (Stage A now calls FlightAware/Open-Meteo directly via `gl.nondet.web.render`) is committed to `contracts/LumenInsurance.py` and fully covered by `gltest`, but has not yet been redeployed to the address above, pending a real judged claim confirming Bradbury's validators can actually reach those external hosts in production — see SECURITY.md's "Known limitations" #5. The currently live contract still runs the prior (binding-gate-without-fetch) revision.
+
 ## What Lumen does
 
 Lumen lets a policyholder write their coverage in plain English instead of filling out a rigid form, and settles claims by having GenLayer's decentralized validator network independently reason over the claim, the policy text, and submitted evidence — reaching consensus on a payout without a human adjuster or a centralized oracle. Two products are supported:

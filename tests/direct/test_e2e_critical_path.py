@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from conftest import mock_two_stage_judgment
+from conftest import mock_two_stage_judgment, mock_default_web_fetches
 
 CONTRACT_PATH = "contracts/LumenInsurance.py"
 GEN_WEI = 1_000_000_000_000_000_000
@@ -118,6 +118,7 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
     # rainfall is still well above threshold -- safe no-op, no state change.
     direct_vm.sender = direct_bob
     direct_vm.clear_mocks()
+    mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(
         r"extracting objective facts only",
         json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 22}),
@@ -138,6 +139,7 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
     # insurance claim's INTENT"), so it's mocked directly here rather than
     # via mock_two_stage_judgment (which targets judge_claim's marker).
     direct_vm.clear_mocks()
+    mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(
         r"extracting objective facts only",
         json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 20, "rainfall_mm": 1}),

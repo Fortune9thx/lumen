@@ -379,6 +379,8 @@ class TestBindingToPolicyDetails:
         contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
 
         direct_vm.clear_mocks()
+        from conftest import mock_default_web_fetches
+        mock_default_web_fetches(direct_vm)
         direct_vm.mock_llm(
             r"extracting objective facts only",
             json.dumps({

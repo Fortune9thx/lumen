@@ -181,5 +181,39 @@ def mock_two_stage_judgment(direct_vm, facts: dict, intent: dict):
     facts.setdefault("record_period_end", "2020-01-01")
     facts.setdefault("record_summary", "Verified record matches the policy's stored details.")
     direct_vm.clear_mocks()
+    mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(r"extracting objective facts only", _json.dumps(facts))
     direct_vm.mock_llm(r"adjudicating an insurance claim's INTENT", _json.dumps(intent))
+
+
+# ----------------------------------------------------------------------------
+# Stage A now fetches real data via gl.nondet.web.render before ever calling
+# an LLM (FlightAware's live page for flight; Open-Meteo's geocoding+archive
+# APIs for weather) -- see LumenInsurance._extract_claim_facts. Every test
+# whose contract call reaches Stage A needs these fetches mocked, or gltest
+# raises MockNotFoundError. All flight tests in this suite use flight number
+# "BA287" (see _create_flight_policy helpers), so a fixed FlightAware body
+# containing that substring satisfies the contract's own deterministic
+# fetch-succeeded check for all of them. The archive/geocoding bodies just
+# need to be non-trivial -- the registered LLM mock is what actually
+# controls dry_days/rainfall_mm/record_period_end in tests.
+# ----------------------------------------------------------------------------
+def mock_default_web_fetches(direct_vm):
+    direct_vm.mock_web(r"flightaware\.com", {
+        "method": "GET", "status": 200,
+        "body": (
+            "FlightAware Flight Tracker for BA287 (London Heathrow LHR to New York JFK). "
+            "Track the current status of flight BA287 from British Airways using the FlightAware "
+            "flight tracker. See if flight BA287 is delayed or cancelled and track the live "
+            "position on a map. View flight history, scheduled and actual departure/arrival "
+            "times, and gate information for BA287 below."
+        ),
+    })
+    direct_vm.mock_web(r"geocoding-api\.open-meteo\.com", {
+        "method": "GET", "status": 200,
+        "body": _json.dumps({"results": [{"latitude": -0.28, "longitude": 36.07}]}),
+    })
+    direct_vm.mock_web(r"archive-api\.open-meteo\.com", {
+        "method": "GET", "status": 200,
+        "body": _json.dumps({"daily": {"time": ["2026-04-01"], "precipitation_sum": [0.0]}}),
+    })

@@ -3,7 +3,7 @@
 **Insurance written in language. Claims judged by decentralized AI. Settled in minutes on GenLayer.**
 
 **Live app:** [lumen-x9.vercel.app](https://lumen-x9.vercel.app)
-**Live contract (Bradbury):** [`0xc881Ecf613cc147c28Be8b41FB5f297bF5e708b8`](https://explorer-bradbury.genlayer.com/address/0xc881Ecf613cc147c28Be8b41FB5f297bF5e708b8)
+**Live contract (Bradbury):** [`0x85D3890C709aE8352A41Bc51DbEEB8b8aBBe728f`](https://explorer-bradbury.genlayer.com/address/0x85D3890C709aE8352A41Bc51DbEEB8b8aBBe728f)
 
 ## What Lumen does
 
@@ -69,7 +69,7 @@ Set `.env` from `.env.example`:
 
 ```bash
 VITE_GENLAYER_CHAIN=bradbury
-VITE_LUMEN_CONTRACT_ADDRESS=0xc881Ecf613cc147c28Be8b41FB5f297bF5e708b8
+VITE_LUMEN_CONTRACT_ADDRESS=0x85D3890C709aE8352A41Bc51DbEEB8b8aBBe728f
 ```
 
 Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, Rabby, etc.) funded with Bradbury testnet GEN — the app discovers your wallet via EIP-6963 and handles network switching (including adding the chain if your wallet doesn't know it yet) automatically. To deploy your own instance instead, see `SECURITY.md` and the `scripts/deploy.mjs` → `check-deploy.mjs` → `probe-contract.mjs` flow (never trust a receipt alone — always read-verify a fresh deploy).

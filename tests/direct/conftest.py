@@ -161,23 +161,33 @@ import json as _json
 
 def mock_two_stage_judgment(direct_vm, facts: dict, intent: dict):
     """facts: the Stage A extraction result, e.g. {"is_cancelled": True,
-    "delay_minutes": 240} or {"dry_days": 20, "rainfall_mm": 1}. Binding
-    fields (record_matches_flight/record_matches_location, record_date/
-    record_period_end, record_summary) default to "record matches, dated
-    well before any realistic test policy's expiry" so existing callers
-    that only care about the payout-relevant facts don't need to know about
-    the binding gate -- pass them explicitly (e.g. record_matches_flight=
-    False, or a record_date after the policy's expiry) to test
-    binding-mismatch/expiry rejection. The expiry check itself is plain
-    Python string comparison in the contract (_is_iso_date_on_or_before),
-    not something this mock controls -- it only supplies the record's
-    reported date.
+    "delay_minutes": 240} or {"dry_days": 20, "rainfall_mm": 1}.
+
+    record_date defaults to "2026-09-12" -- every flight test in this suite
+    creates its policy with flight_date="2026-09-12" (see
+    _create_flight_policy helpers), and the contract now computes
+    record_matches_flight deterministically as
+    `record_date == bound["flight_date"]` (an explicit
+    "record_matches_flight" key in `facts` is ignored for flight -- see
+    _extract_claim_facts's history-page redesign after the live
+    DETERMINISTIC_VIOLATION finding: FlightAware's bare /live page shows
+    whichever flight is CURRENTLY live, which drifted between independent
+    validator fetches in production, so the fetch target moved to
+    /history and the model is pointed at the policy's own bound
+    flight_date specifically). To test a flight-binding-mismatch, pass a
+    record_date that differs from "2026-09-12" (or omit it, since the
+    fetch-failure default is "").
+
+    record_matches_location (weather) is still honored as an explicit
+    LLM-reported field, unaffected by the flight change above.
+    record_period_end defaults to "2020-01-01", well before any test
+    policy's expiry, for the deterministic _is_iso_date_on_or_before check.
+
     intent: the Stage B result, e.g. {"approved": True, "payout_amount": 500,
     "confidence": "0.95", "reasoning": "..."}."""
     facts = dict(facts)
-    facts.setdefault("record_matches_flight", True)
     facts.setdefault("record_matches_location", True)
-    facts.setdefault("record_date", "2020-01-01")
+    facts.setdefault("record_date", "2026-09-12")
     facts.setdefault("record_period_end", "2020-01-01")
     facts.setdefault("record_summary", "Verified record matches the policy's stored details.")
     direct_vm.clear_mocks()
@@ -188,25 +198,26 @@ def mock_two_stage_judgment(direct_vm, facts: dict, intent: dict):
 
 # ----------------------------------------------------------------------------
 # Stage A now fetches real data via gl.nondet.web.render before ever calling
-# an LLM (FlightAware's live page for flight; Open-Meteo's geocoding+archive
-# APIs for weather) -- see LumenInsurance._extract_claim_facts. Every test
-# whose contract call reaches Stage A needs these fetches mocked, or gltest
-# raises MockNotFoundError. All flight tests in this suite use flight number
+# an LLM (FlightAware's /history page for flight; Open-Meteo's
+# geocoding+archive APIs for weather) -- see
+# LumenInsurance._extract_claim_facts. Every test whose contract call
+# reaches Stage A needs these fetches mocked, or gltest raises
+# MockNotFoundError. All flight tests in this suite use flight number
 # "BA287" (see _create_flight_policy helpers), so a fixed FlightAware body
 # containing that substring satisfies the contract's own deterministic
 # fetch-succeeded check for all of them. The archive/geocoding bodies just
 # need to be non-trivial -- the registered LLM mock is what actually
-# controls dry_days/rainfall_mm/record_period_end in tests.
+# controls dry_days/rainfall_mm/record_period_end/record_date in tests
+# (this mocked page's specific row content is never actually parsed by a
+# real LLM here).
 # ----------------------------------------------------------------------------
 def mock_default_web_fetches(direct_vm):
     direct_vm.mock_web(r"flightaware\.com", {
         "method": "GET", "status": 200,
         "body": (
-            "FlightAware Flight Tracker for BA287 (London Heathrow LHR to New York JFK). "
-            "Track the current status of flight BA287 from British Airways using the FlightAware "
-            "flight tracker. See if flight BA287 is delayed or cancelled and track the live "
-            "position on a map. View flight history, scheduled and actual departure/arrival "
-            "times, and gate information for BA287 below."
+            "FlightAware Flight History for BA287 (London Heathrow LHR to New York JFK), "
+            "British Airways. Past flights: 12-Sep-2026 LHR-JFK Landed 1h05m late. "
+            "11-Sep-2026 LHR-JFK Landed on time. 10-Sep-2026 LHR-JFK Cancelled."
         ),
     })
     direct_vm.mock_web(r"geocoding-api\.open-meteo\.com", {

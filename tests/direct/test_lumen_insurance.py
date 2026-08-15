@@ -25,7 +25,7 @@ verification (see SECURITY.md's "Fund safety / Checks-Effects-Interactions" sect
 import json
 import pytest
 
-from conftest import mock_two_stage_judgment
+from conftest import mock_two_stage_judgment, mock_default_web_fetches
 
 CONTRACT_PATH = "contracts/LumenInsurance.py"
 GEN_WEI = 1_000_000_000_000_000_000
@@ -347,23 +347,31 @@ class TestBindingToPolicyDetails:
     MockNotFoundError (test failure), not silently pass."""
 
     def test_record_not_matching_flight_number_or_date_rejects_before_stage_b(self, contract, direct_vm):
+        """record_matches_flight is computed deterministically as
+        `record_date == bound["flight_date"]` (see _extract_claim_facts --
+        redesigned after a live Bradbury test found FlightAware's bare
+        /live page drifts between independent validator fetches; /history
+        plus an exact-date match is what the contract actually checks
+        now). A model reporting no row found for the policy's specific
+        date (empty record_date) must fail the binding gate exactly like
+        an explicit mismatch would."""
         _create_flight_policy(contract, direct_vm)
         contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled on Sept 12.", evidence_urls="https://flightaware.com/live/flight/BA287")
 
         direct_vm.clear_mocks()
+        mock_default_web_fetches(direct_vm)
         direct_vm.mock_llm(
             r"extracting objective facts only",
             json.dumps({
-                "record_matches_flight": False, "record_date": "2026-09-12",
-                "is_cancelled": False, "delay_minutes": 0,
-                "record_summary": "Found a record for flight BA999, not BA287 -- no match.",
+                "record_date": "", "is_cancelled": False, "delay_minutes": 0,
+                "record_summary": "No row for 2026-09-12 found in BA287's FlightAware history table.",
             }),
         )
         status = contract.judge_claim(claim_id="clm_1")
         assert status == "rejected"
 
         claim = json.loads(contract.get_claim(claim_id="clm_1"))
-        assert "BA999" in claim["reasoning"] or "record_matches=False" in claim["reasoning"]
+        assert "record_matches=False" in claim["reasoning"]
         assert claim["verified_facts"]["record_matches_flight"] is False
 
         pool = json.loads(contract.get_pool_status())

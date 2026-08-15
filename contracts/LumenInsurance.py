@@ -241,39 +241,35 @@ class LumenInsurance(gl.Contract):
             return False
 
     def _extract_claim_facts(self, policy_type: str, token: str, policy_text: str, description: str, evidence_urls: str, bound: dict):
-        # Stage A -- fetches a REAL record in contract code (gl.nondet.web),
-        # then has the model extract facts FROM that fetched text -- not
-        # from an unsourced assertion. `bound` (policy-only, never claimant
-        # text) determines what gets fetched: FlightAware's live page for
-        # flight, Open-Meteo's geocoding+archive APIs for weather.
-        # record_matches_* is gated deterministically in Python on the
-        # fetch itself (length/content checks) BEFORE any LLM call, so a
-        # failed/empty fetch can never reach an LLM-asserted "found a
-        # record". record_date/record_period_end are the model's reading of
-        # the fetched record's own date, which judge_claim/
-        # check_weather_trigger then compare deterministically against the
-        # policy's expiry (_is_iso_date_on_or_before) -- not an LLM-judged
-        # "within window" boolean. Uses gl.vm.run_nondet_unsafe: the
-        # validator independently re-fetches and re-extracts, and must
-        # agree (_facts_match) or consensus fails -- so two nodes hitting
-        # stale/different live data disagree, not silently pick one.
+        # Stage A -- fetches a REAL record in contract code (gl.nondet.web.
+        # get, a plain HTTP request -- see per-branch comments for why not
+        # .render), then has the model extract facts FROM that fetched
+        # text, not an unsourced assertion. `bound` (policy-only) picks
+        # what gets fetched: FlightAware history for flight, Open-Meteo
+        # geocoding+archive for weather. record_matches_* is gated
+        # deterministically in Python on the fetch itself, before any LLM
+        # call. record_date/record_period_end are the model's reading of
+        # the fetched record's own date, checked deterministically against
+        # policy expiry by the caller (_is_iso_date_on_or_before), not an
+        # LLM-judged boolean. gl.vm.run_nondet_unsafe: the validator
+        # independently re-fetches and re-extracts, must agree
+        # (_facts_match) or consensus fails.
 
         def leader_fn():
             if policy_type == "flight":
-                # The bare /live/flight/{ident} page shows whatever is
-                # CURRENTLY live for that ident -- content that shifts
-                # between two independent fetches seconds apart, which
-                # broke leader/validator agreement in production (confirmed
-                # live: DETERMINISTIC_VIOLATION across validators querying
-                # the live page at different moments). /history is a table
-                # of discrete COMPLETED past flights -- stable, immutable
-                # content two independent fetches should agree on -- and
-                # the model is targeted at the policy's own bound
-                # flight_date specifically, not "whichever flight is live
-                # right now".
+                # /history (not the bare /live page) so the model targets a
+                # stable, completed record for the policy's own flight_date
+                # -- /live drifts between independent fetches (confirmed
+                # live: DETERMINISTIC_VIOLATION). .get (plain HTTP), not
+                # .render (browser rendering): a live test with .render
+                # took 13-18min/validator and hit VALIDATORS_TIMEOUT --
+                # rendering is the bottleneck, not the URL. Missing JS
+                # content just means fetch_ok below stays False (fail
+                # closed), never a false approval.
                 url = f"https://www.flightaware.com/live/flight/{self._url_encode(bound['flight_number'])}/history"
                 try:
-                    page = gl.nondet.web.render(url, mode="text")
+                    resp = gl.nondet.web.get(url)
+                    page = resp.body.decode("utf-8", errors="replace") if resp.body else ""
                 except Exception:
                     page = ""
                 if not isinstance(page, str):
@@ -290,7 +286,7 @@ class LumenInsurance(gl.Contract):
                         "record_matches_flight": False, "record_date": "", "delay_minutes": 0,
                         "is_cancelled": False, "record_summary": "No FlightAware history could be fetched for this flight number.",
                     }
-                sanitized_page = self._sanitize_evidence(page, max_len=6000)
+                sanitized_page = self._sanitize_evidence(page, max_len=9000)
                 prompt = (
                     "You are extracting objective facts only from a REAL flight history table the "
                     f"contract already fetched -- not judging a claim, not browsing yourself. "
@@ -321,9 +317,12 @@ class LumenInsurance(gl.Contract):
                     "record_summary": str(result.get("record_summary", ""))[:300],
                 }
 
+            # Pure JSON APIs -- .get, not .render (no rendering benefit,
+            # same latency reasoning as flight's fetch above).
             geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={self._url_encode(bound['location'])}&count=1"
             try:
-                geo_text = gl.nondet.web.render(geo_url, mode="text")
+                geo_resp = gl.nondet.web.get(geo_url)
+                geo_text = geo_resp.body.decode("utf-8", errors="replace") if geo_resp.body else ""
             except Exception:
                 geo_text = ""
             try:
@@ -345,7 +344,8 @@ class LumenInsurance(gl.Contract):
                 f"&start_date={start_date}&end_date={end_date}&daily=precipitation_sum&timezone=UTC"
             )
             try:
-                archive_text = gl.nondet.web.render(archive_url, mode="text")
+                archive_resp = gl.nondet.web.get(archive_url)
+                archive_text = archive_resp.body.decode("utf-8", errors="replace") if archive_resp.body else ""
             except Exception:
                 archive_text = ""
             if not isinstance(archive_text, str) or len(archive_text) < 20:

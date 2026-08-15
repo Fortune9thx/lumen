@@ -173,6 +173,54 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
         contract.check_weather_trigger(policy_id=policy_id)
 
 
+def test_weather_trigger_still_settles_when_stage_b_omits_payout_amount(contract, direct_vm, direct_alice):
+    """Live-discovered on Bradbury (2026-08-15): against a real drought
+    record (Aswan, Egypt -- 0mm rain over 20 real archived days),
+    check_weather_trigger reached full validator consensus with a
+    well-reasoned approved=true/confidence=1.0 judgment, but the model's
+    raw JSON omitted payout_amount entirely. Before the fix, the
+    contract's own consistency backstop treated that omission exactly
+    like an explicitly wrong amount and force-rejected an objectively
+    correct trigger. See the identical fix and rationale in
+    test_security_audit_regressions.py's
+    test_payout_amount_omitted_does_not_block_an_otherwise_valid_approval."""
+    direct_vm.sender = direct_alice
+    direct_vm.value = 250 * GEN_WEI
+    try:
+        policy_id = contract.create_weather_policy(
+            location="Aswan, Egypt",
+            period="15 consecutive days between 2026-01-01 and 2026-01-20",
+            coverage_text="Pay 200 GEN if Aswan, Egypt receives less than 5mm of rain over any 15 consecutive days between 2026-01-01 and 2026-01-20.",
+            coverage_amount_gen=200,
+            premium_gen=250,
+            expiry="2026-01-20",
+        )
+    finally:
+        direct_vm.value = 0
+
+    direct_vm.clear_mocks()
+    mock_default_web_fetches(direct_vm)
+    direct_vm.mock_llm(
+        r"extracting objective facts only",
+        json.dumps({"record_matches_location": True, "record_period_end": "2026-01-20", "dry_days": 20, "rainfall_mm": 0}),
+    )
+    direct_vm.mock_llm(
+        r"automatic parametric trigger condition",
+        json.dumps({
+            "approved": True,
+            "confidence": "1.0",
+            "reasoning": "0mm of rainfall over 20 consecutive days satisfies the 5mm/15-day threshold.",
+        }),
+    )
+    triggered = json.loads(contract.check_weather_trigger(policy_id=policy_id))
+
+    assert triggered["triggered"] is True
+    policy_after_paid = json.loads(contract.get_policy(policy_id=policy_id))
+    assert policy_after_paid["status"] == "paid"
+    pool_after_paid = json.loads(contract.get_pool_status())
+    assert pool_after_paid["total_payouts_paid_wei"] == str(200 * GEN_WEI)
+
+
 def test_third_party_can_fund_the_pool_without_owning_any_policy(contract, direct_vm, direct_bob):
     direct_vm.sender = direct_bob
     direct_vm.value = 1000 * GEN_WEI

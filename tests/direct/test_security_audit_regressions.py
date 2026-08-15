@@ -341,6 +341,34 @@ class TestPromptInjectionHardening:
         pool = json.loads(contract.get_pool_status())
         assert pool["total_payouts_paid_wei"] == "0"
 
+    def test_payout_amount_omitted_does_not_block_an_otherwise_valid_approval(self, contract, direct_vm):
+        """Live-discovered on Bradbury (2026-08-15): a well-reasoned,
+        high-confidence Stage B response can OMIT the payout_amount key
+        entirely -- not report it as wrong, just never emit it -- while
+        every other field is well-formed. Unlike an explicit wrong value
+        (the inconsistency test above, which must still correctly reject),
+        an absent key isn't evidence the model was confused about which
+        policy it judged -- it's a formatting slip -- so it must not force
+        an otherwise-valid, high-confidence approval into a false
+        rejection. The actual transfer still always sources coverage_wei
+        from the policy's own stored record, never from this field."""
+        _create_flight_policy(contract, direct_vm, coverage_gen=500, premium_gen=600)
+        contract.submit_claim(policy_id="pol_1", description="BA287 was cancelled.", evidence_urls="https://flightaware.com/live/flight/BA287")
+
+        from conftest import mock_two_stage_judgment
+        mock_two_stage_judgment(
+            direct_vm,
+            facts={"is_cancelled": True, "delay_minutes": 240},
+            intent={"approved": True, "confidence": "0.95", "reasoning": "Confirmed cancelled."},
+        )
+        status = contract.judge_claim(claim_id="clm_1")
+
+        assert status == "approved"
+        policy = json.loads(contract.get_policy(policy_id="pol_1"))
+        assert policy["status"] == "paid"
+        pool = json.loads(contract.get_pool_status())
+        assert pool["total_payouts_paid_wei"] == str(500 * GEN_WEI)
+
     def test_negative_verified_facts_force_rejection_regardless_of_stage_b(self, contract, direct_vm):
         """Deterministic backstop: even if Stage B claims approved=true with
         high confidence and a correct payout_amount, Stage A's independently

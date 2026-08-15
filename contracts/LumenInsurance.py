@@ -661,7 +661,10 @@ class LumenInsurance(gl.Contract):
                 '"payout_amount": (a plain integer, the policy\'s stated coverage amount in GEN '
                 "if approved, otherwise 0), "
                 '"confidence": "(a decimal from 0.0 to 1.0 as a QUOTED STRING, e.g. \\"0.92\\", '
-                'never a bare number)", "reasoning": "(one paragraph, plain string)"}. '
+                'never a bare number)", "reasoning": "(ONE short sentence, under 200 '
+                'characters, plain string)"}. Every key above is REQUIRED -- '
+                "never omit a key, even when its value is the obvious "
+                "default (0, false, or a short reasoning). "
                 "Only claim high confidence when the verified facts clearly and unambiguously "
                 "satisfy the policy; when in doubt, use low confidence and approved=false."
             )
@@ -688,7 +691,7 @@ class LumenInsurance(gl.Contract):
             outcome = safe_default
 
         confidence = self._coerce_confidence(outcome.get("confidence", 0))
-        payout_amount_gen = self._coerce_int(outcome.get("payout_amount", 0))
+        payout_amount_raw = outcome.get("payout_amount")
         reasoning = outcome.get("reasoning", "")
         if not isinstance(reasoning, str):
             reasoning = str(reasoning)
@@ -711,14 +714,23 @@ class LumenInsurance(gl.Contract):
 
         # payout_amount is a consistency signal only, never trusted to set
         # the transfer amount -- that always comes from the policy's own
-        # pre-reserved coverage_amount_wei.
+        # pre-reserved coverage_amount_wei. A model that OMITS the key
+        # entirely (live-observed on Bradbury: a well-reasoned, otherwise-
+        # valid response missing just this one field) is not the same
+        # signal as one that reports an actively wrong amount -- only the
+        # latter indicates the model may be confused about which policy
+        # it's judging, so only that case forces rejection.
         coverage_wei = int(policy_record.get("coverage_amount_wei", "0"))
         coverage_gen = coverage_wei // GEN_WEI if coverage_wei > 0 else 0
-        if approved and payout_amount_gen != coverage_gen:
-            approved = False
-            rejection_reasons.append(
-                f"payout_amount {payout_amount_gen} inconsistent with policy coverage {coverage_gen}"
-            )
+        if payout_amount_raw is None:
+            payout_amount_gen = coverage_gen if approved else 0
+        else:
+            payout_amount_gen = self._coerce_int(payout_amount_raw)
+            if approved and payout_amount_gen != coverage_gen:
+                approved = False
+                rejection_reasons.append(
+                    f"payout_amount {payout_amount_gen} inconsistent with policy coverage {coverage_gen}"
+                )
 
         # Deterministic backstop: unambiguously negative Stage A facts force
         # rejection regardless of Stage B, via plain comparison.
@@ -827,7 +839,10 @@ class LumenInsurance(gl.Contract):
                 '"payout_amount": (a plain integer, the policy\'s stated coverage amount in GEN '
                 "if approved, otherwise 0), "
                 '"confidence": "(a decimal from 0.0 to 1.0 as a QUOTED STRING, e.g. \\"0.92\\", '
-                'never a bare number)", "reasoning": "(one paragraph, plain string)"}. '
+                'never a bare number)", "reasoning": "(ONE short sentence, under 200 '
+                'characters, plain string)"}. Every key above is REQUIRED -- '
+                "never omit a key, even when its value is the obvious "
+                "default (0, false, or a short reasoning). "
                 "Only claim high confidence when the verified facts clearly and unambiguously "
                 "satisfy the policy; when in doubt, use low confidence and approved=false."
             )
@@ -856,15 +871,24 @@ class LumenInsurance(gl.Contract):
         approved_raw = outcome.get("approved", False)
         approved = approved_raw if isinstance(approved_raw, bool) else False
         confidence = self._coerce_confidence(outcome.get("confidence", 0))
-        payout_amount_gen = self._coerce_int(outcome.get("payout_amount", 0))
+        payout_amount_raw = outcome.get("payout_amount")
         reasoning = outcome.get("reasoning", "")
         if not isinstance(reasoning, str):
             reasoning = str(reasoning)
 
         if confidence < CONFIDENCE_THRESHOLD:
             approved = False
-        if approved and payout_amount_gen != coverage_gen:
-            approved = False
+        # See judge_claim's identical comment: a model that omits
+        # payout_amount entirely (live-observed on Bradbury) is not the
+        # same signal as one that actively reports a wrong amount -- only
+        # an explicit mismatch indicates confusion about which policy is
+        # being judged, so only that case forces rejection.
+        if payout_amount_raw is None:
+            payout_amount_gen = coverage_gen if approved else 0
+        else:
+            payout_amount_gen = self._coerce_int(payout_amount_raw)
+            if approved and payout_amount_gen != coverage_gen:
+                approved = False
         if self._coerce_int(facts.get("dry_days")) <= 0:
             approved = False
 

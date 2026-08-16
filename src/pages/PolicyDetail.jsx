@@ -118,6 +118,9 @@ export function PolicyDetail() {
             {policy.type === 'flight' && (
               <span className="text-sm text-text-secondary">Expiry <span className="text-text-primary">{policy.expiry}</span></span>
             )}
+            {policy.type === 'weather' && (
+              <span className="text-sm text-text-secondary">Coverage window <span className="text-text-primary">{policy.period_start} → {policy.expiry}</span></span>
+            )}
           </Reveal>
 
           <Reveal delay={0.15}>

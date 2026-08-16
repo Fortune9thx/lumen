@@ -3,7 +3,7 @@
 **Insurance written in language. Claims judged by decentralized AI. Settled in minutes on GenLayer.**
 
 **Live app:** [lumen-x9.vercel.app](https://lumen-x9.vercel.app)
-**Live contract (Bradbury):** [`0x56ED6eD0a1488817A78c781039Ef627953384beF`](https://explorer-bradbury.genlayer.com/address/0x56ED6eD0a1488817A78c781039Ef627953384beF)
+**Live contract (Bradbury):** [`0x0536c53fcF75774626EA53f47cfa20268C8B74e8`](https://explorer-bradbury.genlayer.com/address/0x0536c53fcF75774626EA53f47cfa20268C8B74e8)
 
 ## What Lumen does
 
@@ -18,15 +18,15 @@ Coverage is real, fund-backed insurance, not a simulation: premiums are paid in 
 
 **Intelligent contract** (`contracts/LumenInsurance.py`) — policies, claims, and a shared payout pool, with GenLayer's Equivalence Principle used for claim adjudication. Judgment runs as a bound extraction stage, a binding gate, then an intent stage:
 
-1. **Fetch-and-extract** — the contract itself fetches a real record bound to the policy's own stored flight number or location (FlightAware for flight, Open-Meteo for weather, via `gl.nondet.web.get`) before any LLM involvement; `record_matches_*` gates deterministically on the fetch, and only then does the model extract facts (delay minutes / cancellation, or dry-day count / rainfall) from that real fetched content — via an independent leader/validator agreement (`gl.vm.run_nondet_unsafe`) that re-fetches and re-extracts independently.
-2. **Binding gate** — if the verified record doesn't match the policy's own stored identity fields, judgment stops here. Expiry is checked deterministically (plain Python date comparison against the policy's own stored expiry, no LLM judgment involved) — GenVM exposes no wall-clock, so this compares the record's own reported date, not "now." Either failure rejects immediately; no intent stage runs.
+1. **Fetch-and-extract** — the contract itself fetches a real record bound to the policy's own stored flight number or location (FlightAware for flight, Open-Meteo for weather, via `gl.nondet.web.get`) before any LLM involvement; for weather, retrieval and the dry-day calculation are both scoped to the policy's own stored coverage window (`period_start` → `expiry`), never an arbitrary date range. `record_matches_*` gates deterministically on the fetch, and only then does the model extract facts (delay minutes / cancellation, or dry-day count / rainfall plus the triggering run's own start/end dates) from that real fetched content — via an independent leader/validator agreement (`gl.vm.run_nondet_unsafe`) that re-fetches and re-extracts independently.
+2. **Binding gate** — if the verified record doesn't match the policy's own stored identity fields, judgment stops here. Expiry is checked deterministically against the event's own reported date(s) (plain Python string comparison, no LLM judgment involved) — GenVM exposes no wall-clock, so this compares the record's own reported date, not "now." Weather checks both ends of the identified run against the policy's own `period_start`/`expiry`, not just the end. Either failure rejects immediately; no intent stage runs.
 3. **Intent judgment** — an LLM call (`gl.eq_principle.prompt_non_comparative`) decides whether those already-agreed, already-bound facts satisfy the policy's plain-English intent, gated by a confidence threshold and strict JSON-boolean parsing before any payout is possible.
 
 **Frontend** (`src/`) — React + Vite + Tailwind, talking to the contract directly via `genlayer-js` (`src/lib/genlayer.js`). No backend, no database — every read and write goes straight to the chain.
 
 ```
 contracts/LumenInsurance.py        Intelligent contract: policies, claims, settlement pool
-tests/direct/                      gltest suite (84 tests)
+tests/direct/                      gltest suite (87 tests)
 src/pages/                         Landing + app pages (Dashboard, Create Policy, Claims, Wallet)
 src/lib/genlayer.js                genlayer-js client + typed contract call wrappers
 src/lib/WalletContext.jsx          Wallet connect state + chain-mismatch detection
@@ -69,7 +69,7 @@ Set `.env` from `.env.example`:
 
 ```bash
 VITE_GENLAYER_CHAIN=bradbury
-VITE_LUMEN_CONTRACT_ADDRESS=0x56ED6eD0a1488817A78c781039Ef627953384beF
+VITE_LUMEN_CONTRACT_ADDRESS=0x0536c53fcF75774626EA53f47cfa20268C8B74e8
 ```
 
 Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet, Coinbase Wallet, Rabby, etc.) funded with Bradbury testnet GEN — the app discovers your wallet via EIP-6963 and handles network switching (including adding the chain if your wallet doesn't know it yet) automatically. To deploy your own instance instead, see `SECURITY.md` and the `scripts/deploy.mjs` → `check-deploy.mjs` → `probe-contract.mjs` flow (never trust a receipt alone — always read-verify a fresh deploy).
@@ -78,7 +78,7 @@ Then `npm run dev` and connect any EIP-1193 browser wallet (MetaMask, OKX Wallet
 
 Full detail in [SECURITY.md](./SECURITY.md). In summary:
 
-- **Real record fetched and authenticated in contract code, expiry enforced deterministically** — Stage A fetches FlightAware (flight) or Open-Meteo (weather) directly via `gl.nondet.web.get`, gates on the fetch itself in plain Python before any LLM call, and a binding gate rejects immediately — before intent judgment ever runs — if the record doesn't match, or if its own reported date falls after the policy's expiry (a plain Python string comparison, not an LLM-judged boolean). Live-verified on Bradbury for both products: a real flight-history fetch and a real weather trigger that reached full validator consensus and paid out from a genuine, independently-confirmed drought record.
+- **Real record fetched and authenticated in contract code, expiry enforced deterministically** — Stage A fetches FlightAware (flight) or Open-Meteo (weather) directly via `gl.nondet.web.get`, gates on the fetch itself in plain Python before any LLM call, and a binding gate rejects immediately — before intent judgment ever runs — if the record doesn't match, or if its own reported date falls outside the policy's stored coverage window (a plain Python string comparison, not an LLM-judged boolean). Weather's retrieval and dry-day calculation are both bound to the policy's own stored `period_start`/`expiry`, and the identified event's own start *and* end dates are checked against that window, so a genuine drought outside the covered period can never trigger a payout. Live-verified on Bradbury for both products: a real flight-history fetch and a real weather trigger that reached full validator consensus and paid out from a genuine, independently-confirmed drought record.
 - **Terminal-state closure is proactive, not just blocked-on-attempt** — a policy that's paid or cancelled immediately closes every other still-pending claim against it (`"sibling claim settled"`/`"policy was cancelled"`), so there's never a dangling claim that looks judgeable but isn't.
 - **Per-policy reserve isolation** — every payout is sourced exclusively from the specific policy being judged's own reserved coverage amount; paying one policy's claim can never read, borrow, or affect another policy's stored reserve.
 - **One settlement path per product, no ambiguity** — flight is owner-submitted (`submit_claim` → `judge_claim`); weather is fully automatic and permissionless (`check_weather_trigger`, callable by anyone). Neither product can settle through the other's path.

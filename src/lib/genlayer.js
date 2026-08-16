@@ -224,10 +224,10 @@ export async function createFlightPolicy({ flightNumber, flightDate, coverageTex
   )
 }
 
-export async function createWeatherPolicy({ location, period, coverageText, coverageAmountGen, premiumGen, expiry }) {
+export async function createWeatherPolicy({ location, period, periodStart, coverageText, coverageAmountGen, premiumGen, expiry }) {
   return writeContract(
     'create_weather_policy',
-    [location, period, coverageText, Number(coverageAmountGen), Number(premiumGen), expiry],
+    [location, period, periodStart, coverageText, Number(coverageAmountGen), Number(premiumGen), expiry],
     genToWei(premiumGen),
   )
 }

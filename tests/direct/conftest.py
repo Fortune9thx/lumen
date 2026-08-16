@@ -180,14 +180,19 @@ def mock_two_stage_judgment(direct_vm, facts: dict, intent: dict):
 
     record_matches_location (weather) is still honored as an explicit
     LLM-reported field, unaffected by the flight change above.
-    record_period_end defaults to "2020-01-01", well before any test
-    policy's expiry, for the deterministic _is_iso_date_on_or_before check.
+    record_period_start/record_period_end default to "2019-01-01"/
+    "2020-01-01" -- placeholders only, not exercised by any current test:
+    every weather test in this suite sets its own facts dict explicitly via
+    a direct mock_llm call (weather policies use varying period_start/
+    expiry windows, so no single default pair could satisfy the two-sided
+    within_period check for all of them -- see _extract_claim_facts).
 
     intent: the Stage B result, e.g. {"approved": True, "payout_amount": 500,
     "confidence": "0.95", "reasoning": "..."}."""
     facts = dict(facts)
     facts.setdefault("record_matches_location", True)
     facts.setdefault("record_date", "2026-09-12")
+    facts.setdefault("record_period_start", "2019-01-01")
     facts.setdefault("record_period_end", "2020-01-01")
     facts.setdefault("record_summary", "Verified record matches the policy's stored details.")
     direct_vm.clear_mocks()

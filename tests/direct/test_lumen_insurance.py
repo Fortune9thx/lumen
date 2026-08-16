@@ -76,7 +76,7 @@ def _create_weather_policy(contract, direct_vm, coverage_gen=200, premium_gen=25
     direct_vm.value = premium_gen * GEN_WEI
     try:
         return contract.create_weather_policy(
-            location="Nakuru", period="Mar-May",
+            location="Nakuru", period="Mar-May", period_start="2026-03-01",
             coverage_text="Pay me $2000 if rainfall stays below 5mm for 15 consecutive days.",
             coverage_amount_gen=coverage_gen, premium_gen=premium_gen,
             expiry="2026-05-31",
@@ -534,7 +534,7 @@ class TestClaimFlowSeparation:
         direct_vm.clear_mocks()
         direct_vm.mock_llm(
             r"extracting objective facts only",
-            json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 30}),
+            json.dumps({"record_matches_location": True, "record_period_start": "2026-03-15", "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 30}),
         )
         result = json.loads(contract.check_weather_trigger(policy_id="pol_1"))
         assert result["triggered"] is False  # no state change, but the call itself succeeds for a non-owner
@@ -554,12 +554,36 @@ class TestClaimFlowSeparation:
         """Same deterministic expiry enforcement as flight -- record_period_end
         after the policy's stored expiry ("2026-05-31" from
         _create_weather_policy) fails the binding gate via plain Python
-        string comparison, regardless of the dry-day count."""
+        string comparison, regardless of the dry-day count. record_period_start
+        is a valid in-period date so this isolates the end-date violation
+        specifically (see test_check_weather_trigger_rejects_when_record_starts_before_period
+        for the start-date counterpart)."""
         _create_weather_policy(contract, direct_vm)
         direct_vm.clear_mocks()
         direct_vm.mock_llm(
             r"extracting objective facts only",
-            json.dumps({"record_matches_location": True, "record_period_end": "2026-06-15", "dry_days": 20, "rainfall_mm": 0}),
+            json.dumps({"record_matches_location": True, "record_period_start": "2026-03-01", "record_period_end": "2026-06-15", "dry_days": 20, "rainfall_mm": 0}),
+        )
+        result = json.loads(contract.check_weather_trigger(policy_id="pol_1"))
+        assert result["triggered"] is False
+
+        policy = json.loads(contract.get_policy(policy_id="pol_1"))
+        assert policy["status"] == "active"
+        assert json.loads(contract.list_claims_by_policy(policy_id="pol_1")) == []
+
+    def test_check_weather_trigger_rejects_when_record_starts_before_period(self, contract, direct_vm):
+        """The out-of-period regression test the steward explicitly asked
+        for: a genuine dry streak that STARTS before the policy's own
+        stored period_start ("2026-03-01" from _create_weather_policy) must
+        not trigger a payout, even though it ends comfortably before expiry
+        and shows a real dry-day count -- a wider retrieval window could
+        otherwise surface a real drought that happened before the
+        policyholder's coverage period even began."""
+        _create_weather_policy(contract, direct_vm)
+        direct_vm.clear_mocks()
+        direct_vm.mock_llm(
+            r"extracting objective facts only",
+            json.dumps({"record_matches_location": True, "record_period_start": "2026-01-01", "record_period_end": "2026-01-20", "dry_days": 20, "rainfall_mm": 0}),
         )
         result = json.loads(contract.check_weather_trigger(policy_id="pol_1"))
         assert result["triggered"] is False

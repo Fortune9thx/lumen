@@ -106,6 +106,7 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
         policy_id = contract.create_weather_policy(
             location="Nakuru County, Kenya",
             period="Mar 1 - May 31",
+            period_start="2026-03-01",
             coverage_text="Pay me 200 GEN if Nakuru receives less than 5mm of rain over any 15 consecutive days.",
             coverage_amount_gen=200,
             premium_gen=250,
@@ -121,7 +122,7 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
     mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(
         r"extracting objective facts only",
-        json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 22}),
+        json.dumps({"record_matches_location": True, "record_period_start": "2026-03-15", "record_period_end": "2026-04-01", "dry_days": 0, "rainfall_mm": 22}),
     )
     result = json.loads(contract.check_weather_trigger(policy_id=policy_id))
     assert result["triggered"] is False
@@ -142,7 +143,7 @@ def test_full_weather_policy_lifecycle_not_triggered_then_triggered(contract, di
     mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(
         r"extracting objective facts only",
-        json.dumps({"record_matches_location": True, "record_period_end": "2026-04-01", "dry_days": 20, "rainfall_mm": 1}),
+        json.dumps({"record_matches_location": True, "record_period_start": "2026-03-12", "record_period_end": "2026-04-01", "dry_days": 20, "rainfall_mm": 1}),
     )
     direct_vm.mock_llm(
         r"automatic parametric trigger condition",
@@ -190,6 +191,7 @@ def test_weather_trigger_still_settles_when_stage_b_omits_payout_amount(contract
         policy_id = contract.create_weather_policy(
             location="Aswan, Egypt",
             period="15 consecutive days between 2026-01-01 and 2026-01-20",
+            period_start="2026-01-01",
             coverage_text="Pay 200 GEN if Aswan, Egypt receives less than 5mm of rain over any 15 consecutive days between 2026-01-01 and 2026-01-20.",
             coverage_amount_gen=200,
             premium_gen=250,
@@ -202,7 +204,7 @@ def test_weather_trigger_still_settles_when_stage_b_omits_payout_amount(contract
     mock_default_web_fetches(direct_vm)
     direct_vm.mock_llm(
         r"extracting objective facts only",
-        json.dumps({"record_matches_location": True, "record_period_end": "2026-01-20", "dry_days": 20, "rainfall_mm": 0}),
+        json.dumps({"record_matches_location": True, "record_period_start": "2026-01-01", "record_period_end": "2026-01-20", "dry_days": 20, "rainfall_mm": 0}),
     )
     direct_vm.mock_llm(
         r"automatic parametric trigger condition",

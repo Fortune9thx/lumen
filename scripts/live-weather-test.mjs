@@ -17,6 +17,7 @@ const hash = await client.writeContract({
   args: [
     'Aswan, Egypt',
     '15 consecutive days between 2026-01-01 and 2026-01-20',
+    '2026-01-01',
     'Pay 1 GEN if Aswan, Egypt receives less than 5mm of total rainfall over any 15 consecutive days between 2026-01-01 and 2026-01-20.',
     1,
     1,

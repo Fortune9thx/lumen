@@ -13,10 +13,11 @@ import { isValidWholeGenAmount, validate } from '../lib/validation.js'
 const CHECKS = [
   ['location', (v) => (v || '').trim().length >= 2, 'Location is required'],
   ['period', (v) => (v || '').trim().length >= 2, 'Coverage period is required'],
+  ['periodStart', (v) => (v || '').trim().length >= 2, 'Coverage start date is required'],
   ['coverageText', (v) => (v || '').trim().length >= 20, 'Describe the condition in at least 20 characters'],
   ['coverageAmountGen', (v) => isValidWholeGenAmount(v), 'Enter a whole GEN amount greater than 0, e.g. 2000'],
   ['premiumGen', (v) => isValidWholeGenAmount(v), 'Enter a whole GEN amount greater than 0, e.g. 120'],
-  ['expiry', (v) => (v || '').trim().length >= 2, 'Expiry date is required'],
+  ['expiry', (v, all) => (v || '').trim().length >= 2 && (!all.periodStart || v >= all.periodStart), 'Expiry must be on or after the coverage start date'],
 ]
 
 export function CreatePolicyWeather() {
@@ -25,6 +26,7 @@ export function CreatePolicyWeather() {
   const [form, setForm] = useState({
     location: '',
     period: '',
+    periodStart: '',
     coverageText: '',
     coverageAmountGen: '',
     premiumGen: '',
@@ -89,11 +91,18 @@ export function CreatePolicyWeather() {
                 <Input placeholder="120" inputMode="numeric" value={form.premiumGen} onChange={set('premiumGen')} error={fieldErrors.premiumGen} />
               </FormField>
             </div>
-            <FormField label="Expiry" error={fieldErrors.expiry}>
-              <Input type="date" value={form.expiry} onChange={set('expiry')} error={fieldErrors.expiry} />
-            </FormField>
+            <div className="grid sm:grid-cols-2 gap-4">
+              <FormField label="Coverage starts" error={fieldErrors.periodStart}>
+                <Input type="date" value={form.periodStart} onChange={set('periodStart')} error={fieldErrors.periodStart} />
+              </FormField>
+              <FormField label="Expiry" error={fieldErrors.expiry}>
+                <Input type="date" value={form.expiry} onChange={set('expiry')} error={fieldErrors.expiry} />
+              </FormField>
+            </div>
             <p className="text-xs text-text-muted leading-relaxed -mt-2">
-              The last date the automatic weather trigger will consider a matching record valid for this policy.
+              GenLayer validators only look for your qualifying condition within this exact window — rainfall
+              retrieval and the dry-day calculation are both bound to it, so a real drought outside these dates
+              can never trigger a payout.
             </p>
             <p className="text-xs text-text-muted leading-relaxed">
               This is a parametric policy — your premium is paid in GEN and held in Lumen's payout pool. GenLayer

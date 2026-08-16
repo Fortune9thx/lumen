@@ -195,7 +195,38 @@ class TestContractLevelInputValidation:
         try:
             with pytest.raises(Exception):
                 contract.create_weather_policy(
-                    location="", period="Mar-May",
+                    location="", period="Mar-May", period_start="2026-03-01",
+                    coverage_text="Pay $2000 if drought.",
+                    coverage_amount_gen=2000, premium_gen=120,
+                    expiry="2026-05-31",
+                )
+        finally:
+            direct_vm.value = 0
+
+    def test_empty_period_start_rejected_for_weather_policy(self, contract, direct_vm):
+        direct_vm.value = 120 * GEN_WEI
+        try:
+            with pytest.raises(Exception):
+                contract.create_weather_policy(
+                    location="Nakuru", period="Mar-May", period_start="",
+                    coverage_text="Pay $2000 if drought.",
+                    coverage_amount_gen=2000, premium_gen=120,
+                    expiry="2026-05-31",
+                )
+        finally:
+            direct_vm.value = 0
+
+    def test_period_start_after_expiry_rejected_for_weather_policy(self, contract, direct_vm):
+        """A policy can't have its own coverage period start after its own
+        expiry -- this would produce an empty/inverted retrieval window
+        (_extract_claim_facts's start_date > end_date) and can never be
+        satisfiable. Rejected deterministically at creation time rather
+        than silently producing an unwinnable policy."""
+        direct_vm.value = 120 * GEN_WEI
+        try:
+            with pytest.raises(Exception):
+                contract.create_weather_policy(
+                    location="Nakuru", period="Mar-May", period_start="2026-06-01",
                     coverage_text="Pay $2000 if drought.",
                     coverage_amount_gen=2000, premium_gen=120,
                     expiry="2026-05-31",
